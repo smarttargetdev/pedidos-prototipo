@@ -3,6 +3,7 @@ import {
   Activity,
   Code2,
   Database,
+  Download,
   FilePlus2,
   Menu,
   Pause,
@@ -113,6 +114,47 @@ export default function App() {
     if (logLevelFilter === 'ALL') return logs;
     return logs.filter((l) => l.level === logLevelFilter);
   }, [state?.logs, logLevelFilter]);
+
+  const handleExportLogs = () => {
+    if (filteredLogs.length === 0) return;
+
+    const payload = {
+      exportedAtUtc: new Date().toISOString(),
+      levelFilter: logLevelFilter,
+      totalRecords: filteredLogs.length,
+      logs: filteredLogs.map((log) => {
+        let parsedDetails: unknown = null;
+        if (log.detailsJson) {
+          try {
+            parsedDetails = JSON.parse(log.detailsJson);
+          } catch {
+            parsedDetails = log.detailsJson;
+          }
+        }
+        return {
+          id: log.id,
+          timestampUtc: log.timestampUtc,
+          level: log.level,
+          source: log.source,
+          eventCode: log.eventCode,
+          orderId: log.orderId,
+          message: log.message,
+          details: parsedDetails,
+        };
+      }),
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    link.href = url;
+    link.download = `order-reservation-logs-${logLevelFilter.toLowerCase()}-${stamp}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
 
   const selectedOrder: OrderDto | null = useMemo(
     () => orders.find((o) => o.id === selectedOrderId) ?? null,
@@ -636,21 +678,32 @@ export default function App() {
                         Formato consistente com EventCode, timestamps UTC e propriedades JSON
                       </p>
                     </div>
-                    <div className="flex items-center gap-1 p-0.5 bg-slate-100 rounded-lg">
-                      {(['ALL', 'INFO', 'WARN', 'ERROR'] as const).map((lvl) => (
-                        <button
-                          key={lvl}
-                          type="button"
-                          onClick={() => setLogLevelFilter(lvl)}
-                          className={`px-2 py-1 text-[11px] font-medium rounded-md whitespace-nowrap ${
-                            logLevelFilter === lvl
-                              ? 'bg-white text-slate-900 shadow-xs'
-                              : 'text-slate-600 hover:text-slate-900'
-                          }`}
-                        >
-                          {lvl === 'ALL' ? 'Todos' : lvl}
-                        </button>
-                      ))}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex items-center gap-1 p-0.5 bg-slate-100 rounded-lg">
+                        {(['ALL', 'INFO', 'WARN', 'ERROR'] as const).map((lvl) => (
+                          <button
+                            key={lvl}
+                            type="button"
+                            onClick={() => setLogLevelFilter(lvl)}
+                            className={`px-2 py-1 text-[11px] font-medium rounded-md whitespace-nowrap ${
+                              logLevelFilter === lvl
+                                ? 'bg-white text-slate-900 shadow-xs'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            {lvl === 'ALL' ? 'Todos' : lvl}
+                          </button>
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        disabled={filteredLogs.length === 0}
+                        onClick={handleExportLogs}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 disabled:opacity-40 whitespace-nowrap shrink-0"
+                      >
+                        <Download className="w-3.5 h-3.5" aria-hidden="true" />
+                        Exportar Logs
+                      </button>
                     </div>
                   </div>
                   <div className="bg-slate-950 text-slate-200 p-4 font-mono text-[11px] space-y-2.5 max-h-80 overflow-y-auto tabular-nums">
