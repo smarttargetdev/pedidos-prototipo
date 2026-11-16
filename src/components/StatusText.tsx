@@ -11,11 +11,11 @@ export function OrderStatusText({ status }: { status: OrderStatus }) {
     );
   }
 
-  if (status === 'PedidoAbortado') {
+  if (status === 'PedidoCancelado') {
     return (
       <span className="inline-flex items-center gap-1.5 text-xs font-medium text-red-700 whitespace-nowrap">
         <Ban className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-        PedidoAbortado
+        PedidoCancelado
       </span>
     );
   }
@@ -48,7 +48,7 @@ export function OutboxStatusText({
     return (
       <span className="inline-flex items-center gap-1.5 text-xs font-medium text-red-700 whitespace-nowrap">
         <Ban className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-        Cancelada (Abortado)
+        Outbox Cancelada
       </span>
     );
   }

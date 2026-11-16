@@ -65,10 +65,10 @@ public sealed class OutboxProcessorServiceTests
     }
 
     [Fact]
-    public async Task ProcessPendingBatch_ShouldCancelOutboxAndSkipInventory_WhenOrderIsAborted()
+    public async Task ProcessPendingBatch_ShouldCancelOutboxAndSkipInventory_WhenOrderIsCancelled()
     {
         var order = Order.Create("Carlos", "carlos@loja.com.br", [("Mouse", 1, 150m)], false, _nowUtc);
-        order.Abort(_nowUtc.AddSeconds(2));
+        order.Cancel(_nowUtc.AddSeconds(2));
         var outbox = OutboxMessage.CreatePedidoCriado(order.Id, "{}", _nowUtc);
 
         _outboxRepoMock

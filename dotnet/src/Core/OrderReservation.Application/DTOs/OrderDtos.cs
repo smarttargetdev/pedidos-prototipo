@@ -9,7 +9,7 @@ public sealed record CreateOrderRequest(
     string CustomerName,
     string CustomerEmail,
     IReadOnlyCollection<OrderItemRequest> Items,
-    bool Abortado = false);
+    bool Cancelado = false);
 
 public sealed record OrderItemResponse(
     Guid Id,

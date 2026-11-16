@@ -18,7 +18,7 @@ export function WebhookSettingsPanel({
   const [endpointUrl, setEndpointUrl] = useState('');
   const [hmacSecret, setHmacSecret] = useState('');
   const [notifyEstoque, setNotifyEstoque] = useState(true);
-  const [notifyAbortado, setNotifyAbortado] = useState(true);
+  const [notifyCancelado, setNotifyCancelado] = useState(true);
 
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -34,7 +34,7 @@ export function WebhookSettingsPanel({
     setEndpointUrl(config.endpointUrl);
     setHmacSecret(config.hmacSecret);
     setNotifyEstoque(config.notifyOnEstoqueReservado);
-    setNotifyAbortado(config.notifyOnPedidoAbortado);
+    setNotifyCancelado(config.notifyOnPedidoCancelado);
     setInitialized(true);
   }, [config, initialized]);
 
@@ -58,7 +58,7 @@ export function WebhookSettingsPanel({
           endpointUrl,
           hmacSecret,
           notifyOnEstoqueReservado: notifyEstoque,
-          notifyOnPedidoAbortado: notifyAbortado,
+          notifyOnPedidoCancelado: notifyCancelado,
         }),
       });
       if (!res.ok) {
@@ -117,7 +117,7 @@ export function WebhookSettingsPanel({
               Configurações de Webhook
             </h2>
             <p className="text-[11px] text-slate-500">
-              Dispara HTTP POST automático ao transitar para EstoqueReservado ou PedidoAbortado
+              Dispara HTTP POST automático ao transitar para EstoqueReservado ou PedidoCancelado
             </p>
           </div>
         </div>
@@ -203,11 +203,11 @@ export function WebhookSettingsPanel({
             <label className="inline-flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
-                checked={notifyAbortado}
-                onChange={(e) => setNotifyAbortado(e.target.checked)}
+                checked={notifyCancelado}
+                onChange={(e) => setNotifyCancelado(e.target.checked)}
                 className="rounded border-slate-300 text-slate-900 focus:ring-blue-600"
               />
-              <span className="font-mono">PedidoAbortado</span>
+              <span className="font-mono">PedidoCancelado</span>
             </label>
           </div>
 

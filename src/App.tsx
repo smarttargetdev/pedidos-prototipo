@@ -24,7 +24,7 @@ import { OperationalAlerts, type OperationalAlert } from './components/Operation
 import { WebhookSettingsPanel } from './components/WebhookSettingsPanel';
 
 type ActiveTab = 'overview' | 'orders-api' | 'dotnet-code';
-type StatusFilter = 'ALL' | 'PedidoCriado' | 'EstoqueReservado' | 'PedidoAbortado';
+type StatusFilter = 'ALL' | 'PedidoCriado' | 'EstoqueReservado' | 'PedidoCancelado';
 type LogLevelFilter = 'ALL' | 'INFO' | 'WARN' | 'ERROR';
 
 export default function App() {
@@ -45,7 +45,7 @@ export default function App() {
   const [retryLimitError, setRetryLimitError] = useState<string | null>(null);
 
   const initializedAlertsRef = useRef(false);
-  const seenAbortedIdsRef = useRef<Set<string>>(new Set());
+  const seenCancelledIdsRef = useRef<Set<string>>(new Set());
   const lastSeenErrorLogIdRef = useRef<number>(0);
   const lastErrorBurstAlertAtRef = useRef<number>(0);
 
@@ -90,28 +90,28 @@ export default function App() {
   useEffect(() => {
     if (!state) return;
 
-    const abortedOrders = state.orders.filter((o) => o.status === 'PedidoAbortado');
+    const cancelledOrders = state.orders.filter((o) => o.status === 'PedidoCancelado');
     const errorLogs = state.logs.filter((l) => l.level === 'ERROR');
     const maxErrorId = errorLogs.reduce((max, l) => Math.max(max, l.id), 0);
 
     // Baseline existing records on initial load so no arrival banners fire prematurely
     if (!initializedAlertsRef.current) {
       initializedAlertsRef.current = true;
-      seenAbortedIdsRef.current = new Set(abortedOrders.map((o) => o.id));
+      seenCancelledIdsRef.current = new Set(cancelledOrders.map((o) => o.id));
       lastSeenErrorLogIdRef.current = maxErrorId;
       return;
     }
 
-    // 1. Detect newly aborted orders
-    for (const order of abortedOrders) {
-      if (!seenAbortedIdsRef.current.has(order.id)) {
-        seenAbortedIdsRef.current.add(order.id);
+    // 1. Detect newly cancelled orders
+    for (const order of cancelledOrders) {
+      if (!seenCancelledIdsRef.current.has(order.id)) {
+        seenCancelledIdsRef.current.add(order.id);
         pushAlert(
           {
-            id: `aborted-${order.id}-${Date.now()}`,
-            kind: 'aborted-order',
-            title: 'Novo pedido abortado',
-            message: `Pedido ${order.id.slice(0, 8)}... (${order.customerName}) marcado como PedidoAbortado. O estoque não será avisado.`,
+            id: `cancelled-${order.id}-${Date.now()}`,
+            kind: 'cancelled-order',
+            title: 'Novo pedido cancelado',
+            message: `Pedido ${order.id.slice(0, 8)}... (${order.customerName}) marcado como PedidoCancelado. O estoque não será avisado.`,
             createdAtMs: Date.now(),
             orderId: order.id,
           },
@@ -183,8 +183,8 @@ export default function App() {
     await updateConfig({ maxRetryAttempts: parsed });
   };
 
-  const handleAbortOrder = async (orderId: string) => {
-    await fetch(`/api/orders/${encodeURIComponent(orderId)}/abort`, { method: 'POST' });
+  const handleCancelOrder = async (orderId: string) => {
+    await fetch(`/api/orders/${encodeURIComponent(orderId)}/cancel`, { method: 'POST' });
     await fetchState();
   };
 
@@ -210,7 +210,7 @@ export default function App() {
       body: JSON.stringify({ seed }),
     });
     initializedAlertsRef.current = false;
-    seenAbortedIdsRef.current.clear();
+    seenCancelledIdsRef.current.clear();
     lastSeenErrorLogIdRef.current = 0;
     lastErrorBurstAlertAtRef.current = 0;
     setAlerts([]);
@@ -290,8 +290,8 @@ export default function App() {
     const waitingRetry = orders.filter(
       (o) => o.status === 'PedidoCriado' && o.outbox?.status === 'FailedWaitingRetry'
     ).length;
-    const aborted = orders.filter((o) => o.status === 'PedidoAbortado').length;
-    return { total, reserved, waitingRetry, aborted };
+    const cancelled = orders.filter((o) => o.status === 'PedidoCancelado').length;
+    return { total, reserved, waitingRetry, cancelled };
   }, [orders]);
 
   const breadcrumbLabel =
@@ -469,9 +469,9 @@ export default function App() {
                   <div className="mt-1 text-xs text-slate-500">Retidos no Outbox</div>
                 </div>
                 <div className="bg-white border border-slate-200 rounded-xl p-4">
-                  <div className="text-xs text-slate-500">Pedidos Abortados</div>
+                  <div className="text-xs text-slate-500">Pedidos Cancelados</div>
                   <div className="mt-1 text-2xl font-semibold font-mono tabular-nums text-red-700">
-                    {metrics.aborted}
+                    {metrics.cancelled}
                   </div>
                   <div className="mt-1 text-xs text-slate-500">Sem envio ao estoque</div>
                 </div>
@@ -674,7 +674,7 @@ export default function App() {
                           { id: 'ALL', label: 'Todos' },
                           { id: 'PedidoCriado', label: 'PedidoCriado' },
                           { id: 'EstoqueReservado', label: 'EstoqueReservado' },
-                          { id: 'PedidoAbortado', label: 'PedidoAbortado' },
+                          { id: 'PedidoCancelado', label: 'PedidoCancelado' },
                         ] as const
                       ).map((tab) => (
                         <button
@@ -784,7 +784,7 @@ export default function App() {
                                   </div>
                                 ) : (
                                   <span className="text-xs text-slate-500">
-                                    Sem Outbox (Abortado)
+                                    Sem Outbox (Cancelado)
                                   </span>
                                 )}
                               </td>
@@ -812,10 +812,10 @@ export default function App() {
                                   {order.status === 'PedidoCriado' && (
                                     <button
                                       type="button"
-                                      onClick={() => handleAbortOrder(order.id)}
+                                      onClick={() => handleCancelOrder(order.id)}
                                       className="px-2.5 py-1 text-xs font-medium text-red-700 bg-red-50 border border-red-200 rounded hover:bg-red-100 whitespace-nowrap"
                                     >
-                                      Abortar
+                                      Cancelar
                                     </button>
                                   )}
                                   <button
@@ -974,7 +974,7 @@ export default function App() {
             <CreateAndQueryView
               recentOrders={orders}
               onOrderCreated={fetchState}
-              onAbortOrder={handleAbortOrder}
+              onCancelOrder={handleCancelOrder}
             />
           )}
 
@@ -988,7 +988,7 @@ export default function App() {
           nowMs={nowMs}
           maxRetryAttempts={state?.config.maxRetryAttempts ?? 5}
           onClose={() => setSelectedOrderId(null)}
-          onAbort={handleAbortOrder}
+          onCancel={handleCancelOrder}
           onAdvanceRetry={handleAdvanceRetry}
           onRequeue={handleRequeueOrder}
           onTestConcurrency={handleTestConcurrency}

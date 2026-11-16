@@ -15,7 +15,7 @@ public sealed class WebhookOptions
     public string EndpointUrl { get; set; } = string.Empty;
     public string? HmacSecret { get; set; }
     public bool NotifyOnEstoqueReservado { get; set; } = true;
-    public bool NotifyOnPedidoAbortado { get; set; } = true;
+    public bool NotifyOnPedidoCancelado { get; set; } = true;
     public int TimeoutSeconds { get; set; } = 5;
 }
 
@@ -37,7 +37,7 @@ public sealed class HttpWebhookNotifier(
             return;
         }
 
-        if (notification.EventType == "PedidoAbortado" && !options.NotifyOnPedidoAbortado)
+        if (notification.EventType == "PedidoCancelado" && !options.NotifyOnPedidoCancelado)
         {
             return;
         }

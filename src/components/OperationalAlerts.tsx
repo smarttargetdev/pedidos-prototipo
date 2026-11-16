@@ -3,7 +3,7 @@ import { AlertTriangle, Ban, Eye, X } from 'lucide-react';
 
 export interface OperationalAlert {
   id: string;
-  kind: 'aborted-order' | 'worker-error-burst';
+  kind: 'cancelled-order' | 'worker-error-burst';
   title: string;
   message: string;
   createdAtMs: number;

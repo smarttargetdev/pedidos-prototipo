@@ -38,7 +38,7 @@ public sealed class OrderValidationTests
             invalidName,
             "cliente@loja.com.br",
             [("Produto A", 1, 50m)],
-            aborted: false,
+            cancelled: false,
             _fixedUtc);
 
         var ex = Assert.Throws<DomainException>(act);
@@ -52,7 +52,7 @@ public sealed class OrderValidationTests
             "Ana Souza",
             "",
             [("Produto A", 1, 50m)],
-            aborted: false,
+            cancelled: false,
             _fixedUtc);
 
         Assert.Throws<DomainException>(act);
@@ -65,7 +65,7 @@ public sealed class OrderValidationTests
             "Ana Souza",
             "ana@loja.com.br",
             [],
-            aborted: false,
+            cancelled: false,
             _fixedUtc);
 
         Assert.Throws<DomainException>(act);
@@ -103,7 +103,7 @@ public sealed class OrderValidationTests
                 new OrderItemRequest("Teclado TKL", 2, 250.50m),
                 new OrderItemRequest("Mouse Pro", 1, 199.00m)
             ],
-            Abortado: false);
+            Cancelado: false);
 
         var response = await service.CreateOrderAsync(request, CancellationToken.None);
 
@@ -118,7 +118,7 @@ public sealed class OrderValidationTests
     }
 
     [Fact]
-    public async Task CreateOrderAsync_WithAbortadoTrue_ShouldNotCreateOutboxMessage()
+    public async Task CreateOrderAsync_WithCanceladoTrue_ShouldNotCreateOutboxMessage()
     {
         var service = new OrderService(
             _orderRepoMock.Object,
@@ -132,31 +132,31 @@ public sealed class OrderValidationTests
             "Carlos Mendes",
             "carlos@loja.com.br",
             [new OrderItemRequest("Monitor 27", 1, 1899.90m)],
-            Abortado: true);
+            Cancelado: true);
 
         var response = await service.CreateOrderAsync(request, CancellationToken.None);
 
-        Assert.Equal(nameof(OrderStatus.PedidoAbortado), response.Status);
+        Assert.Equal(nameof(OrderStatus.PedidoCancelado), response.Status);
         Assert.Null(response.Outbox);
         _outboxRepoMock.Verify(r => r.AddAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
         _webhookMock.Verify(w => w.NotifyAsync(
-            It.Is<WebhookNotification>(n => n.OrderId == response.Id && n.EventType == nameof(OrderStatus.PedidoAbortado)),
+            It.Is<WebhookNotification>(n => n.OrderId == response.Id && n.EventType == nameof(OrderStatus.PedidoCancelado)),
             It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
-    public void AbortOrder_ShouldThrowDomainException_WhenInventoryAlreadyReserved()
+    public void CancelOrder_ShouldThrowDomainException_WhenInventoryAlreadyReserved()
     {
         var order = Order.Create(
             "Ana Souza",
             "ana@loja.com.br",
             [("SSD 1TB", 1, 450m)],
-            aborted: false,
+            cancelled: false,
             _fixedUtc);
 
         order.MarkInventoryReserved(_fixedUtc.AddSeconds(5));
 
-        var act = () => order.Abort(_fixedUtc.AddSeconds(10));
+        var act = () => order.Cancel(_fixedUtc.AddSeconds(10));
         Assert.Throws<DomainException>(act);
     }
 }

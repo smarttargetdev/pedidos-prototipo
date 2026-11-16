@@ -7,7 +7,7 @@ Content-Type: application/json
 {
   "customerName": "Ana Beatriz Souza",
   "customerEmail": "ana.souza@exemplo.com.br",
-  "abortado": false,
+  "cancelado": false,
   "items": [
     {
       "productName": "Teclado Mecânico TKL",
@@ -22,14 +22,14 @@ Content-Type: application/json
   ]
 }
 
-### Criar pedido já abortado (não notifica estoque)
+### Criar pedido já cancelado (não notifica estoque)
 POST {{api_HostAddress}}/api/orders
 Content-Type: application/json
 
 {
   "customerName": "Carlos Mendes",
   "customerEmail": "carlos@exemplo.com.br",
-  "abortado": true,
+  "cancelado": true,
   "items": [
     {
       "productName": "Monitor 27 UHD",
@@ -42,5 +42,5 @@ Content-Type: application/json
 ### Consultar pedido por ID único
 GET {{api_HostAddress}}/api/orders/00000000-0000-0000-0000-000000000000
 
-### Abortar pedido antes do envio ao estoque
-POST {{api_HostAddress}}/api/orders/00000000-0000-0000-0000-000000000000/abort
+### Cancelar pedido antes do envio ao estoque
+POST {{api_HostAddress}}/api/orders/00000000-0000-0000-0000-000000000000/cancel

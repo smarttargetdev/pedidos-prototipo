@@ -191,7 +191,7 @@ public sealed class OutboxWorkerIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task AbortedOrder_ShouldNeverCallInventoryGatewayWhenWorkerRuns()
+    public async Task CancelledOrder_ShouldNeverCallInventoryGatewayWhenWorkerRuns()
     {
         var created = await _orderService.CreateOrderAsync(
             new CreateOrderRequest(
@@ -200,7 +200,7 @@ public sealed class OutboxWorkerIntegrationTests : IAsyncLifetime
                 [new OrderItemRequest("Mouse Gamer", 1, 250.00m)]),
             CancellationToken.None);
 
-        await _orderService.AbortOrderAsync(created.Id, CancellationToken.None);
+        await _orderService.CancelOrderAsync(created.Id, CancellationToken.None);
 
         var processed = await _processor.ProcessPendingBatchAsync("worker-A", 10, CancellationToken.None);
         Assert.Equal(0, processed);

@@ -30,15 +30,16 @@ public sealed class OrdersController(IOrderService orderService) : ControllerBas
         return Ok(order);
     }
 
+    [HttpPost("{id:guid}/cancel")]
     [HttpPost("{id:guid}/abort")]
     [ProducesResponseType<OrderResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<OrderResponse>> AbortOrder(
+    public async Task<ActionResult<OrderResponse>> CancelOrder(
         Guid id,
         CancellationToken cancellationToken)
     {
-        var order = await orderService.AbortOrderAsync(id, cancellationToken);
+        var order = await orderService.CancelOrderAsync(id, cancellationToken);
         return Ok(order);
     }
 }

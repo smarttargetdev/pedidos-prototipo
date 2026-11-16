@@ -1,4 +1,4 @@
-export type OrderStatus = 'PedidoCriado' | 'PedidoAbortado' | 'EstoqueReservado';
+export type OrderStatus = 'PedidoCriado' | 'PedidoCancelado' | 'EstoqueReservado';
 
 export type OutboxStatus =
   | 'Pending'
@@ -87,14 +87,14 @@ export interface WebhookConfigDto {
   endpointUrl: string;
   hmacSecret: string;
   notifyOnEstoqueReservado: boolean;
-  notifyOnPedidoAbortado: boolean;
+  notifyOnPedidoCancelado: boolean;
   updatedAtUtc: string;
 }
 
 export interface WebhookDeliveryDto {
   id: string;
   orderId: string | null;
-  eventType: 'EstoqueReservado' | 'PedidoAbortado' | 'WebhookTest';
+  eventType: 'EstoqueReservado' | 'PedidoCancelado' | 'WebhookTest';
   targetUrl: string;
   payloadJson: string;
   signatureHeader: string | null;

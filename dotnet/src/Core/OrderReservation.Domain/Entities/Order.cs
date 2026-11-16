@@ -23,7 +23,7 @@ public sealed class Order
         string customerName,
         string customerEmail,
         IEnumerable<(string ProductName, int Quantity, decimal UnitPrice)> items,
-        bool aborted,
+        bool cancelled,
         DateTime utcNow)
     {
         if (string.IsNullOrWhiteSpace(customerName))
@@ -48,7 +48,7 @@ public sealed class Order
             Id = orderId,
             CustomerName = customerName.Trim(),
             CustomerEmail = customerEmail.Trim(),
-            Status = aborted ? OrderStatus.PedidoAbortado : OrderStatus.PedidoCriado,
+            Status = cancelled ? OrderStatus.PedidoCancelado : OrderStatus.PedidoCriado,
             PedidoCriadoAtUtc = utcNow,
             CreatedAtUtc = utcNow,
             UpdatedAtUtc = utcNow
@@ -67,27 +67,27 @@ public sealed class Order
         return order;
     }
 
-    public void Abort(DateTime utcNow)
+    public void Cancel(DateTime utcNow)
     {
         if (Status == OrderStatus.EstoqueReservado)
         {
-            throw new DomainException("Não é possível abortar um pedido cujo estoque já foi reservado.");
+            throw new DomainException("Não é possível cancelar um pedido cujo estoque já foi reservado.");
         }
 
-        if (Status == OrderStatus.PedidoAbortado)
+        if (Status == OrderStatus.PedidoCancelado)
         {
             return;
         }
 
-        Status = OrderStatus.PedidoAbortado;
+        Status = OrderStatus.PedidoCancelado;
         UpdatedAtUtc = utcNow;
     }
 
     public void MarkInventoryReserved(DateTime utcNow)
     {
-        if (Status == OrderStatus.PedidoAbortado)
+        if (Status == OrderStatus.PedidoCancelado)
         {
-            throw new DomainException("Pedidos abortados não podem ser marcados como reservados.");
+            throw new DomainException("Pedidos cancelados não podem ser marcados como reservados.");
         }
 
         Status = OrderStatus.EstoqueReservado;

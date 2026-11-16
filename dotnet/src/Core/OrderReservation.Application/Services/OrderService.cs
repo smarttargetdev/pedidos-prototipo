@@ -13,7 +13,7 @@ public interface IOrderService
 {
     Task<OrderResponse> CreateOrderAsync(CreateOrderRequest request, CancellationToken cancellationToken);
     Task<OrderResponse> GetOrderByIdAsync(Guid orderId, CancellationToken cancellationToken);
-    Task<OrderResponse> AbortOrderAsync(Guid orderId, CancellationToken cancellationToken);
+    Task<OrderResponse> CancelOrderAsync(Guid orderId, CancellationToken cancellationToken);
 }
 
 public sealed class OrderService(
@@ -33,12 +33,12 @@ public sealed class OrderService(
             request.CustomerName,
             request.CustomerEmail,
             items,
-            request.Abortado,
+            request.Cancelado,
             utcNow);
 
         OutboxMessage? outboxMessage = null;
 
-        if (!request.Abortado)
+        if (!request.Cancelado)
         {
             var payloadJson = JsonSerializer.Serialize(new
             {
@@ -76,9 +76,9 @@ public sealed class OrderService(
                 outboxMessage is not null);
         }
 
-        if (request.Abortado)
+        if (request.Cancelado)
         {
-            await DispatchWebhookSafelyAsync(order, nameof(OrderStatus.PedidoAbortado), utcNow, cancellationToken);
+            await DispatchWebhookSafelyAsync(order, nameof(OrderStatus.PedidoCancelado), utcNow, cancellationToken);
         }
 
         return MapToResponse(order, outboxMessage);
@@ -93,18 +93,18 @@ public sealed class OrderService(
         return MapToResponse(order, outbox);
     }
 
-    public async Task<OrderResponse> AbortOrderAsync(Guid orderId, CancellationToken cancellationToken)
+    public async Task<OrderResponse> CancelOrderAsync(Guid orderId, CancellationToken cancellationToken)
     {
         Order? order = null;
         OutboxMessage? outbox = null;
-        var abortedAt = clock.UtcNow;
+        var cancelledAt = clock.UtcNow;
 
         await unitOfWork.ExecuteInTransactionAsync(async ct =>
         {
             order = await orderRepository.GetByIdAsync(orderId, ct)
                 ?? throw new OrderNotFoundException(orderId);
 
-            order.Abort(abortedAt);
+            order.Cancel(cancelledAt);
 
             outbox = await outboxRepository.GetByOrderIdAsync(orderId, ct);
             outbox?.Cancel();
@@ -114,10 +114,10 @@ public sealed class OrderService(
 
         using (logger.BeginScope(new Dictionary<string, object> { ["OrderId"] = orderId }))
         {
-            logger.OrderAborted(orderId, abortedAt, outbox is not null);
+            logger.OrderCancelled(orderId, cancelledAt, outbox is not null);
         }
 
-        await DispatchWebhookSafelyAsync(order!, nameof(OrderStatus.PedidoAbortado), abortedAt, cancellationToken);
+        await DispatchWebhookSafelyAsync(order!, nameof(OrderStatus.PedidoCancelado), cancelledAt, cancellationToken);
 
         return MapToResponse(order!, outbox);
     }

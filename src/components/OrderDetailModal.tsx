@@ -8,7 +8,7 @@ interface OrderDetailModalProps {
   nowMs: number;
   maxRetryAttempts: number;
   onClose: () => void;
-  onAbort: (orderId: string) => Promise<void>;
+  onCancel: (orderId: string) => Promise<void>;
   onAdvanceRetry: (orderId: string) => Promise<void>;
   onRequeue: (orderId: string) => Promise<void>;
   onTestConcurrency: (orderId: string) => Promise<void>;
@@ -19,7 +19,7 @@ export function OrderDetailModal({
   nowMs,
   maxRetryAttempts,
   onClose,
-  onAbort,
+  onCancel,
   onAdvanceRetry,
   onRequeue,
   onTestConcurrency,
@@ -174,7 +174,7 @@ export function OrderDetailModal({
               </div>
             ) : (
               <p className="text-xs text-slate-500">
-                Nenhuma mensagem Outbox gerada porque o pedido foi criado como PedidoAbortado.
+                Nenhuma mensagem Outbox gerada porque o pedido foi criado como PedidoCancelado.
               </p>
             )}
           </div>
@@ -231,7 +231,7 @@ export function OrderDetailModal({
                 onClick={async () => {
                   setBusy(true);
                   try {
-                    await onAbort(order.id);
+                    await onCancel(order.id);
                   } finally {
                     setBusy(false);
                   }
@@ -239,7 +239,7 @@ export function OrderDetailModal({
                 className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 whitespace-nowrap shrink-0"
               >
                 <Ban className="w-3.5 h-3.5" />
-                Abortar Pedido
+                Cancelar Pedido
               </button>
             )}
             <button

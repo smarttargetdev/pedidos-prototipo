@@ -22,11 +22,11 @@ public static partial class StructuredLogEvents
     [LoggerMessage(
         EventId = 1002,
         Level = LogLevel.Warning,
-        Message = "[ORDER_ABORTED] Pedido {OrderId} abortado em {AbortedAtUtc:O} | OutboxCancelada={OutboxCancelled} | EstoqueNotificado=false")]
-    public static partial void OrderAborted(
+        Message = "[ORDER_CANCELLED] Pedido {OrderId} cancelado em {CancelledAtUtc:O} | OutboxCancelada={OutboxCancelled} | EstoqueNotificado=false")]
+    public static partial void OrderCancelled(
         this ILogger logger,
         Guid orderId,
-        DateTime abortedAtUtc,
+        DateTime cancelledAtUtc,
         bool outboxCancelled);
 
     [LoggerMessage(
@@ -71,8 +71,8 @@ public static partial class StructuredLogEvents
     [LoggerMessage(
         EventId = 2004,
         Level = LogLevel.Warning,
-        Message = "[OUTBOX_SKIPPED_ABORTED] Worker={WorkerId} | Pedido={OrderId} está PedidoAbortado; envio ao sistema de estoque bloqueado.")]
-    public static partial void OutboxSkippedAborted(
+        Message = "[OUTBOX_SKIPPED_CANCELLED] Worker={WorkerId} | Pedido={OrderId} está PedidoCancelado; envio ao sistema de estoque bloqueado.")]
+    public static partial void OutboxSkippedCancelled(
         this ILogger logger,
         string workerId,
         Guid orderId);

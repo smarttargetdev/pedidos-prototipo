@@ -6,7 +6,7 @@ import { OrderStatusText, OutboxStatusText } from './StatusText';
 interface CreateAndQueryViewProps {
   recentOrders: OrderDto[];
   onOrderCreated: () => Promise<void>;
-  onAbortOrder: (orderId: string) => Promise<void>;
+  onCancelOrder: (orderId: string) => Promise<void>;
 }
 
 interface DraftItem {
@@ -18,11 +18,11 @@ interface DraftItem {
 export function CreateAndQueryView({
   recentOrders,
   onOrderCreated,
-  onAbortOrder,
+  onCancelOrder,
 }: CreateAndQueryViewProps) {
   const [customerName, setCustomerName] = useState('Fernanda Almeida');
   const [customerEmail, setCustomerEmail] = useState('fernanda.almeida@loja.com.br');
-  const [abortado, setAbortado] = useState(false);
+  const [cancelado, setCancelado] = useState(false);
   const [items, setItems] = useState<DraftItem[]>([
     { productName: 'Notebook Workstation 16"', quantity: 1, unitPrice: 6490.0 },
     { productName: 'Hub USB-C Thunderbolt', quantity: 2, unitPrice: 320.0 },
@@ -63,7 +63,7 @@ export function CreateAndQueryView({
       const res = await fetch('/api/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ customerName, customerEmail, items, abortado }),
+        body: JSON.stringify({ customerName, customerEmail, items, cancelado }),
       });
       const body = await res.json();
       if (!res.ok) {
@@ -226,12 +226,12 @@ export function CreateAndQueryView({
           <label className="flex items-start gap-2.5 p-3 bg-slate-50 border border-slate-200 rounded-lg cursor-pointer">
             <input
               type="checkbox"
-              checked={abortado}
-              onChange={(e) => setAbortado(e.target.checked)}
+              checked={cancelado}
+              onChange={(e) => setCancelado(e.target.checked)}
               className="mt-0.5 rounded border-slate-300 text-slate-900 focus:ring-blue-600"
             />
             <span className="text-xs text-slate-700 leading-relaxed">
-              <strong className="font-semibold text-slate-900">Criar como Pedido Abortado</strong> — grava o registro no SQLite com status <span className="font-mono">PedidoAbortado</span> e não envia evento para a Outbox nem para o sistema de estoque.
+              <strong className="font-semibold text-slate-900">Criar como Pedido Cancelado</strong> — grava o registro no SQLite com status <span className="font-mono">PedidoCancelado</span> e não envia evento para a Outbox nem para o sistema de estoque.
             </span>
           </label>
 
@@ -350,7 +350,7 @@ export function CreateAndQueryView({
                 {lookupResult.outbox ? (
                   <OutboxStatusText status={lookupResult.outbox.status} />
                 ) : (
-                  <span className="text-slate-600">Sem registro na Outbox (Abortado)</span>
+                  <span className="text-slate-600">Sem registro na Outbox (Cancelado)</span>
                 )}
               </div>
             </div>
@@ -359,13 +359,13 @@ export function CreateAndQueryView({
               <button
                 type="button"
                 onClick={async () => {
-                  await onAbortOrder(lookupResult.id);
+                  await onCancelOrder(lookupResult.id);
                   await handleLookup(lookupResult.id);
                 }}
                 className="w-full inline-flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-medium text-red-700 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 whitespace-nowrap"
               >
                 <Ban className="w-3.5 h-3.5" />
-                Abortar Pedido Antes do Envio (POST /abort)
+                Cancelar Pedido Antes do Envio (POST /cancel)
               </button>
             )}
           </div>

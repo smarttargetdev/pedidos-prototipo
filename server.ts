@@ -129,10 +129,23 @@ function initializeSchema() {
     db.exec('ALTER TABLE worker_logs ADD COLUMN details_json TEXT;');
   }
 
+  const webhookCols = db.prepare('PRAGMA table_info(webhook_config)').all() as Array<{ name: string }>;
+  const webhookColNames = new Set(webhookCols.map((c) => c.name));
+  if (!webhookColNames.has('notify_pedido_cancelado')) {
+    db.exec('ALTER TABLE webhook_config ADD COLUMN notify_pedido_cancelado INTEGER NOT NULL DEFAULT 1;');
+    if (webhookColNames.has('notify_pedido_abortado')) {
+      db.exec('UPDATE webhook_config SET notify_pedido_cancelado = notify_pedido_abortado;');
+    }
+  }
+
+  // Migra eventuais registros legados de PedidoAbortado para PedidoCancelado
+  db.exec("UPDATE orders SET status = 'PedidoCancelado' WHERE status = 'PedidoAbortado';");
+  db.exec("UPDATE webhook_deliveries SET event_type = 'PedidoCancelado' WHERE event_type = 'PedidoAbortado';");
+
   db.prepare(
     `INSERT OR IGNORE INTO webhook_config
-     (id, enabled, endpoint_url, hmac_secret, notify_estoque_reservado, notify_pedido_abortado, updated_at_utc)
-     VALUES (1, 0, '', '', 1, 1, ?)`
+     (id, enabled, endpoint_url, hmac_secret, notify_estoque_reservado, notify_pedido_abortado, notify_pedido_cancelado, updated_at_utc)
+     VALUES (1, 0, '', '', 1, 1, 1, ?)`
   ).run(new Date().toISOString());
 
   const defaults: Record<string, string> = {
@@ -256,12 +269,13 @@ function getWebhookConfig(): WebhookConfigDto {
     string,
     unknown
   >;
+  const cancelFlag = row.notify_pedido_cancelado ?? row.notify_pedido_abortado ?? 1;
   return {
     enabled: Number(row.enabled) === 1,
     endpointUrl: String(row.endpoint_url ?? ''),
     hmacSecret: String(row.hmac_secret ?? ''),
     notifyOnEstoqueReservado: Number(row.notify_estoque_reservado) === 1,
-    notifyOnPedidoAbortado: Number(row.notify_pedido_abortado) === 1,
+    notifyOnPedidoCancelado: Number(cancelFlag) === 1,
     updatedAtUtc: String(row.updated_at_utc),
   };
 }
@@ -288,7 +302,7 @@ function getWebhookDeliveries(): WebhookDeliveryDto[] {
 }
 
 async function dispatchWebhookNotification(
-  eventType: 'EstoqueReservado' | 'PedidoAbortado' | 'WebhookTest',
+  eventType: 'EstoqueReservado' | 'PedidoCancelado' | 'WebhookTest',
   orderId: string | null,
   customerName: string,
   totalAmount: number,
@@ -302,7 +316,7 @@ async function dispatchWebhookNotification(
   if (!options?.forceSend) {
     if (!cfg.enabled || !targetUrl) return null;
     if (eventType === 'EstoqueReservado' && !cfg.notifyOnEstoqueReservado) return null;
-    if (eventType === 'PedidoAbortado' && !cfg.notifyOnPedidoAbortado) return null;
+    if (eventType === 'PedidoCancelado' && !cfg.notifyOnPedidoCancelado) return null;
   }
 
   if (!targetUrl) {
@@ -499,11 +513,11 @@ function seedDemoDataIfEmpty() {
        VALUES (?, ?, 'PedidoCriado', ?, 'Enqueued', ?)`
     ).run(crypto.randomUUID(), order2Id, JSON.stringify({ orderId: order2Id }), t2);
 
-    // Order 3: Aborted at creation (no outbox, no inventory notification)
+    // Order 3: Cancelled at creation (no outbox, no inventory notification)
     db.prepare(
       `INSERT INTO orders (id, customer_name, customer_email, status, total_amount, pedido_criado_at_utc, created_at_utc, updated_at_utc)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(order3Id, 'Lucas Ferreira', 'lucas.f@cliente.com.br', 'PedidoAbortado', 380.0, t3, t3, t3);
+    ).run(order3Id, 'Lucas Ferreira', 'lucas.f@cliente.com.br', 'PedidoCancelado', 380.0, t3, t3, t3);
 
     db.prepare(
       `INSERT INTO order_items (id, order_id, product_name, quantity, unit_price, subtotal)
@@ -543,9 +557,9 @@ function seedDemoDataIfEmpty() {
       'WARN',
       'API',
       order3Id,
-      `Pedido criado como PedidoAbortado. Nenhuma mensagem gerada na Outbox; estoque não notificado.`,
+      `Pedido criado como PedidoCancelado. Nenhuma mensagem gerada na Outbox; estoque não notificado.`,
       'ORDER_CREATED',
-      { customerName: 'Lucas Ferreira', itemCount: 1, totalAmount: 380, status: 'PedidoAbortado', outboxCreated: false },
+      { customerName: 'Lucas Ferreira', itemCount: 1, totalAmount: 380, status: 'PedidoCancelado', outboxCreated: false },
       t3
     );
   } catch (err) {
@@ -661,7 +675,7 @@ function runWorkerCycle() {
       .prepare('SELECT * FROM orders WHERE id = ?')
       .get(msg.orderId) as Record<string, unknown> | undefined;
 
-    if (!orderRow || orderRow.status === 'PedidoAbortado') {
+    if (!orderRow || orderRow.status === 'PedidoCancelado') {
       db.prepare(
         `UPDATE outbox_messages
          SET status = 'Cancelled', locked_by = NULL, locked_until_utc = NULL, next_retry_at_utc = NULL
@@ -672,8 +686,8 @@ function runWorkerCycle() {
         'WARN',
         'Worker',
         msg.orderId,
-        `[${config.workerInstanceId}] Pedido está PedidoAbortado. Outbox cancelada; estoque não será avisado.`,
-        'OUTBOX_SKIPPED_ABORTED',
+        `[${config.workerInstanceId}] Pedido está PedidoCancelado. Outbox cancelada; estoque não será avisado.`,
+        'OUTBOX_SKIPPED_CANCELLED',
         { workerId: config.workerInstanceId }
       );
       continue;
@@ -838,12 +852,12 @@ function runWorkerCycle() {
     const durationMs = Date.now() - attemptStarted;
     db.exec('BEGIN IMMEDIATE;');
     try {
-      // Double check order wasn't aborted during external call
+      // Double check order wasn't cancelled during external call
       const latestOrder = db
         .prepare('SELECT status FROM orders WHERE id = ?')
         .get(msg.orderId) as { status: string };
 
-      if (latestOrder.status === 'PedidoAbortado') {
+      if (latestOrder.status === 'PedidoCancelado') {
         db.prepare(
           `UPDATE outbox_messages
            SET status = 'Cancelled', locked_by = NULL, locked_until_utc = NULL
@@ -955,7 +969,7 @@ async function bootstrap() {
 
   // POST /api/orders
   app.post('/api/orders', (req, res) => {
-    const { customerName, customerEmail, items, abortado } = req.body ?? {};
+    const { customerName, customerEmail, items, cancelado, abortado } = req.body ?? {};
 
     if (typeof customerName !== 'string' || !customerName.trim()) {
       return res.status(400).json({
@@ -1011,8 +1025,8 @@ async function bootstrap() {
       Math.round(normalizedItems.reduce((acc, i) => acc + i.subtotal, 0) * 100) / 100;
     const orderId = crypto.randomUUID();
     const nowIso = new Date().toISOString();
-    const isAborted = Boolean(abortado);
-    const status = isAborted ? 'PedidoAbortado' : 'PedidoCriado';
+    const isCancelled = Boolean(cancelado ?? abortado);
+    const status = isCancelled ? 'PedidoCancelado' : 'PedidoCriado';
 
     db.exec('BEGIN IMMEDIATE;');
     try {
@@ -1038,7 +1052,7 @@ async function bootstrap() {
         itemStmt.run(item.id, orderId, item.productName, item.quantity, item.unitPrice, item.subtotal);
       }
 
-      if (!isAborted) {
+      if (!isCancelled) {
         const outboxId = crypto.randomUUID();
         const payloadJson = JSON.stringify({
           orderId,
@@ -1058,19 +1072,19 @@ async function bootstrap() {
       db.exec('COMMIT;');
 
       writeLog(
-        isAborted ? 'WARN' : 'INFO',
+        isCancelled ? 'WARN' : 'INFO',
         'API',
         orderId,
-        isAborted
-          ? `Pedido criado como PedidoAbortado (${customerName.trim()} · ${normalizedItems.length} itens · R$ ${totalAmount.toFixed(2)}). Estoque não será avisado.`
+        isCancelled
+          ? `Pedido criado como PedidoCancelado (${customerName.trim()} · ${normalizedItems.length} itens · R$ ${totalAmount.toFixed(2)}). Estoque não será avisado.`
           : `Pedido gravado com stamp PedidoCriado (${customerName.trim()} · ${normalizedItems.length} itens · R$ ${totalAmount.toFixed(2)}). Outbox criada na mesma transação.`,
         'ORDER_CREATED',
-        { customerName: customerName.trim(), itemCount: normalizedItems.length, totalAmount, status, outboxCreated: !isAborted }
+        { customerName: customerName.trim(), itemCount: normalizedItems.length, totalAmount, status, outboxCreated: !isCancelled }
       );
 
-      if (isAborted) {
+      if (isCancelled) {
         void dispatchWebhookNotification(
-          'PedidoAbortado',
+          'PedidoCancelado',
           orderId,
           customerName.trim(),
           totalAmount,
@@ -1109,8 +1123,8 @@ async function bootstrap() {
     return res.json(mapOrderRow(row));
   });
 
-  // POST /api/orders/:id/abort
-  app.post('/api/orders/:id/abort', (req, res) => {
+  // POST /api/orders/:id/cancel (alias /abort for compatibility)
+  app.post(['/api/orders/:id/cancel', '/api/orders/:id/abort'], (req, res) => {
     const orderId = req.params.id;
     const nowIso = new Date().toISOString();
 
@@ -1132,12 +1146,12 @@ async function bootstrap() {
         db.exec('ROLLBACK;');
         return res.status(400).json({
           title: 'Regra de negócio violada',
-          detail: 'Não é possível abortar um pedido cujo estoque já foi reservado.',
+          detail: 'Não é possível cancelar um pedido cujo estoque já foi reservado.',
         });
       }
 
       db.prepare('UPDATE orders SET status = ?, updated_at_utc = ? WHERE id = ?').run(
-        'PedidoAbortado',
+        'PedidoCancelado',
         nowIso,
         orderId
       );
@@ -1154,8 +1168,8 @@ async function bootstrap() {
         'WARN',
         'API',
         orderId,
-        `Pedido abortado via POST /api/orders/${orderId.slice(0, 8)}.../abort. Outbox cancelada; estoque não será notificado.`,
-        'ORDER_ABORTED',
+        `Pedido cancelado via POST /api/orders/${orderId.slice(0, 8)}.../cancel. Outbox cancelada; estoque não será notificado.`,
+        'ORDER_CANCELLED',
         { orderId, outboxCancelled: true }
       );
 
@@ -1165,7 +1179,7 @@ async function bootstrap() {
       >;
       const mapped = mapOrderRow(updatedRow);
       void dispatchWebhookNotification(
-        'PedidoAbortado',
+        'PedidoCancelado',
         orderId,
         mapped.customerName,
         mapped.totalAmount,
@@ -1413,6 +1427,7 @@ async function bootstrap() {
       endpointUrl,
       hmacSecret,
       notifyOnEstoqueReservado,
+      notifyOnPedidoCancelado,
       notifyOnPedidoAbortado,
     } = req.body ?? {};
 
@@ -1424,21 +1439,21 @@ async function bootstrap() {
       typeof notifyOnEstoqueReservado === 'boolean'
         ? notifyOnEstoqueReservado
         : current.notifyOnEstoqueReservado;
-    const nextAbort =
-      typeof notifyOnPedidoAbortado === 'boolean'
-        ? notifyOnPedidoAbortado
-        : current.notifyOnPedidoAbortado;
+    const requestedCancel = notifyOnPedidoCancelado ?? notifyOnPedidoAbortado;
+    const nextCancel =
+      typeof requestedCancel === 'boolean' ? requestedCancel : current.notifyOnPedidoCancelado;
 
     db.prepare(
       `UPDATE webhook_config
-       SET enabled = ?, endpoint_url = ?, hmac_secret = ?, notify_estoque_reservado = ?, notify_pedido_abortado = ?, updated_at_utc = ?
+       SET enabled = ?, endpoint_url = ?, hmac_secret = ?, notify_estoque_reservado = ?, notify_pedido_abortado = ?, notify_pedido_cancelado = ?, updated_at_utc = ?
        WHERE id = 1`
     ).run(
       nextEnabled ? 1 : 0,
       nextUrl,
       nextSecret,
       nextEstoque ? 1 : 0,
-      nextAbort ? 1 : 0,
+      nextCancel ? 1 : 0,
+      nextCancel ? 1 : 0,
       new Date().toISOString()
     );
 

@@ -57,7 +57,7 @@ public sealed class OrdersApiIntegrationTests(OrdersApiWebFactory factory)
                 new OrderItemRequest("Cadeira Ergonômica", 1, 1450.00m),
                 new OrderItemRequest("Suporte Notebook", 2, 125.00m)
             ],
-            Abortado: false);
+            Cancelado: false);
 
         var postResponse = await _client.PostAsJsonAsync("/api/orders", payload);
         Assert.Equal(HttpStatusCode.Created, postResponse.StatusCode);
@@ -90,20 +90,20 @@ public sealed class OrdersApiIntegrationTests(OrdersApiWebFactory factory)
     }
 
     [Fact]
-    public async Task PostOrder_WithAbortadoTrue_ShouldPersistWithoutOutboxInSqlite()
+    public async Task PostOrder_WithCanceladoTrue_ShouldPersistWithoutOutboxInSqlite()
     {
         var payload = new CreateOrderRequest(
             "Roberto Lima",
             "roberto@loja.com.br",
             [new OrderItemRequest("Webcam 4K", 1, 599.00m)],
-            Abortado: true);
+            Cancelado: true);
 
         var postResponse = await _client.PostAsJsonAsync("/api/orders", payload);
         Assert.Equal(HttpStatusCode.Created, postResponse.StatusCode);
 
         var created = await postResponse.Content.ReadFromJsonAsync<OrderResponse>();
         Assert.NotNull(created);
-        Assert.Equal(nameof(OrderStatus.PedidoAbortado), created!.Status);
+        Assert.Equal(nameof(OrderStatus.PedidoCancelado), created!.Status);
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -112,24 +112,24 @@ public sealed class OrdersApiIntegrationTests(OrdersApiWebFactory factory)
     }
 
     [Fact]
-    public async Task PostAbortOrder_ShouldCancelPendingOutboxInSqlite()
+    public async Task PostCancelOrder_ShouldCancelPendingOutboxInSqlite()
     {
         var payload = new CreateOrderRequest(
             "Patricia Gomes",
             "patricia@loja.com.br",
             [new OrderItemRequest("Dock Station", 1, 890.00m)],
-            Abortado: false);
+            Cancelado: false);
 
         var created = await (await _client.PostAsJsonAsync("/api/orders", payload))
             .Content.ReadFromJsonAsync<OrderResponse>();
         Assert.NotNull(created);
 
-        var abortResponse = await _client.PostAsync($"/api/orders/{created!.Id}/abort", null);
-        Assert.Equal(HttpStatusCode.OK, abortResponse.StatusCode);
+        var cancelResponse = await _client.PostAsync($"/api/orders/{created!.Id}/cancel", null);
+        Assert.Equal(HttpStatusCode.OK, cancelResponse.StatusCode);
 
-        var aborted = await abortResponse.Content.ReadFromJsonAsync<OrderResponse>();
-        Assert.Equal(nameof(OrderStatus.PedidoAbortado), aborted!.Status);
-        Assert.Equal(nameof(OutboxStatus.Cancelled), aborted.Outbox!.Status);
+        var cancelled = await cancelResponse.Content.ReadFromJsonAsync<OrderResponse>();
+        Assert.Equal(nameof(OrderStatus.PedidoCancelado), cancelled!.Status);
+        Assert.Equal(nameof(OutboxStatus.Cancelled), cancelled.Outbox!.Status);
     }
 
     [Fact]

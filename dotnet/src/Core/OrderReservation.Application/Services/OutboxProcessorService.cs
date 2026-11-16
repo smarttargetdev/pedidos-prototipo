@@ -65,11 +65,11 @@ public sealed class OutboxProcessorService(
         }
 
         var order = await orderRepository.GetByIdAsync(orderId, cancellationToken);
-        if (order is null || order.Status == OrderStatus.PedidoAbortado)
+        if (order is null || order.Status == OrderStatus.PedidoCancelado)
         {
             message.Cancel();
             await unitOfWork.SaveChangesAsync(cancellationToken);
-            logger.OutboxSkippedAborted(workerId, orderId);
+            logger.OutboxSkippedCancelled(workerId, orderId);
             return;
         }
 
