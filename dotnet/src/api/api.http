@@ -1,0 +1,46 @@
+@api_HostAddress = http://localhost:5150
+
+### Criar pedido normal (gera stamp PedidoCriado + Outbox)
+POST {{api_HostAddress}}/api/orders
+Content-Type: application/json
+
+{
+  "customerName": "Ana Beatriz Souza",
+  "customerEmail": "ana.souza@exemplo.com.br",
+  "abortado": false,
+  "items": [
+    {
+      "productName": "Teclado Mecânico TKL",
+      "quantity": 1,
+      "unitPrice": 489.90
+    },
+    {
+      "productName": "Mouse Sem Fio Pro",
+      "quantity": 2,
+      "unitPrice": 215.00
+    }
+  ]
+}
+
+### Criar pedido já abortado (não notifica estoque)
+POST {{api_HostAddress}}/api/orders
+Content-Type: application/json
+
+{
+  "customerName": "Carlos Mendes",
+  "customerEmail": "carlos@exemplo.com.br",
+  "abortado": true,
+  "items": [
+    {
+      "productName": "Monitor 27 UHD",
+      "quantity": 1,
+      "unitPrice": 2190.00
+    }
+  ]
+}
+
+### Consultar pedido por ID único
+GET {{api_HostAddress}}/api/orders/00000000-0000-0000-0000-000000000000
+
+### Abortar pedido antes do envio ao estoque
+POST {{api_HostAddress}}/api/orders/00000000-0000-0000-0000-000000000000/abort

@@ -1,0 +1,6 @@
+{
+  "name": "OrderReservation .NET 10 & Outbox Simulator",
+  "description": "Plataforma de pedidos e reserva de estoque em .NET 10 (api e worker com EF Core 10, SQLite, SOLID e Transactional Outbox) com simulador web interativo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
