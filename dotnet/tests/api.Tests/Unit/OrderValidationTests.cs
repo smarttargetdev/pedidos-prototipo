@@ -15,6 +15,7 @@ public sealed class OrderValidationTests
     private readonly Mock<IOutboxRepository> _outboxRepoMock = new();
     private readonly Mock<IUnitOfWork> _uowMock = new();
     private readonly Mock<IDateTimeProvider> _clockMock = new();
+    private readonly Mock<IWebhookNotifier> _webhookMock = new();
     private readonly DateTime _fixedUtc = new(2026, 11, 16, 15, 0, 0, DateTimeKind.Utc);
 
     public OrderValidationTests()
@@ -92,6 +93,7 @@ public sealed class OrderValidationTests
             _outboxRepoMock.Object,
             _uowMock.Object,
             _clockMock.Object,
+            _webhookMock.Object,
             NullLogger<OrderService>.Instance);
 
         var request = new CreateOrderRequest(
@@ -123,6 +125,7 @@ public sealed class OrderValidationTests
             _outboxRepoMock.Object,
             _uowMock.Object,
             _clockMock.Object,
+            _webhookMock.Object,
             NullLogger<OrderService>.Instance);
 
         var request = new CreateOrderRequest(
@@ -136,6 +139,9 @@ public sealed class OrderValidationTests
         Assert.Equal(nameof(OrderStatus.PedidoAbortado), response.Status);
         Assert.Null(response.Outbox);
         _outboxRepoMock.Verify(r => r.AddAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+        _webhookMock.Verify(w => w.NotifyAsync(
+            It.Is<WebhookNotification>(n => n.OrderId == response.Id && n.EventType == nameof(OrderStatus.PedidoAbortado)),
+            It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]

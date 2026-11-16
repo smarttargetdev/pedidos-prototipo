@@ -5,12 +5,15 @@ import crypto from 'crypto';
 import { DatabaseSync } from 'node:sqlite';
 import type {
   DotnetSourceFileDto,
+  InventoryMetricPointDto,
   InventoryMode,
   OrderDto,
   OrderItemDto,
   OutboxSummaryDto,
   QueueRecordDto,
   SimulatorConfigDto,
+  WebhookConfigDto,
+  WebhookDeliveryDto,
   WorkerLogDto,
 } from './src/types.ts';
 
@@ -90,6 +93,31 @@ function initializeSchema() {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS webhook_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      enabled INTEGER NOT NULL DEFAULT 0,
+      endpoint_url TEXT NOT NULL DEFAULT '',
+      hmac_secret TEXT NOT NULL DEFAULT '',
+      notify_estoque_reservado INTEGER NOT NULL DEFAULT 1,
+      notify_pedido_abortado INTEGER NOT NULL DEFAULT 1,
+      updated_at_utc TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+      id TEXT PRIMARY KEY,
+      order_id TEXT,
+      event_type TEXT NOT NULL,
+      target_url TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      signature_header TEXT,
+      http_status INTEGER,
+      success INTEGER NOT NULL,
+      duration_ms INTEGER NOT NULL,
+      response_preview TEXT,
+      error_message TEXT,
+      created_at_utc TEXT NOT NULL
+    );
   `);
 
   const logCols = db.prepare('PRAGMA table_info(worker_logs)').all() as Array<{ name: string }>;
@@ -101,11 +129,18 @@ function initializeSchema() {
     db.exec('ALTER TABLE worker_logs ADD COLUMN details_json TEXT;');
   }
 
+  db.prepare(
+    `INSERT OR IGNORE INTO webhook_config
+     (id, enabled, endpoint_url, hmac_secret, notify_estoque_reservado, notify_pedido_abortado, updated_at_utc)
+     VALUES (1, 0, '', '', 1, 1, ?)`
+  ).run(new Date().toISOString());
+
   const defaults: Record<string, string> = {
     queue_available: 'true',
     inventory_mode: 'intermittent',
     worker_running: 'true',
     worker_instance_id: 'worker-net10-01',
+    max_retry_attempts: '5',
   };
 
   const insertCfg = db.prepare(
@@ -122,12 +157,13 @@ function writeLog(
   orderId: string | null,
   message: string,
   eventCode = 'SYSTEM_EVENT',
-  details?: Record<string, unknown>
+  details?: Record<string, unknown>,
+  timestampUtc?: string
 ) {
   db.prepare(
     'INSERT INTO worker_logs (timestamp_utc, level, source, event_code, order_id, message, details_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
   ).run(
-    new Date().toISOString(),
+    timestampUtc ?? new Date().toISOString(),
     level,
     source,
     eventCode,
@@ -136,10 +172,65 @@ function writeLog(
     details ? JSON.stringify(details) : null
   );
 
-  // Keep latest 150 log lines to avoid unbounded growth
+  // Keep latest 1000 log lines so 30-minute telemetry remains complete
   db.exec(
-    'DELETE FROM worker_logs WHERE id NOT IN (SELECT id FROM worker_logs ORDER BY id DESC LIMIT 150)'
+    'DELETE FROM worker_logs WHERE id NOT IN (SELECT id FROM worker_logs ORDER BY id DESC LIMIT 1000)'
   );
+}
+
+function buildInventoryMetrics30m(): InventoryMetricPointDto[] {
+  const nowMs = Date.now();
+  const currentMinuteStartMs = Math.floor(nowMs / 60_000) * 60_000;
+  const windowStartIso = new Date(currentMinuteStartMs - 29 * 60_000).toISOString();
+
+  const rows = db
+    .prepare(
+      `SELECT timestamp_utc, event_code
+       FROM worker_logs
+       WHERE event_code IN ('INVENTORY_DISPATCH_SUCCEEDED', 'INVENTORY_DISPATCH_FAILED')
+         AND timestamp_utc >= ?`
+    )
+    .all(windowStartIso) as Array<{ timestamp_utc: string; event_code: string }>;
+
+  const buckets = new Map<number, { success: number; failure: number }>();
+  for (let i = 29; i >= 0; i--) {
+    const bucketMs = currentMinuteStartMs - i * 60_000;
+    buckets.set(bucketMs, { success: 0, failure: 0 });
+  }
+
+  for (const row of rows) {
+    const tsMs = new Date(row.timestamp_utc).getTime();
+    if (Number.isNaN(tsMs)) continue;
+    const bucketMs = Math.floor(tsMs / 60_000) * 60_000;
+    const entry = buckets.get(bucketMs);
+    if (!entry) continue;
+    if (row.event_code === 'INVENTORY_DISPATCH_SUCCEEDED') {
+      entry.success += 1;
+    } else if (row.event_code === 'INVENTORY_DISPATCH_FAILED') {
+      entry.failure += 1;
+    }
+  }
+
+  const points: InventoryMetricPointDto[] = [];
+  for (const [bucketMs, counts] of buckets.entries()) {
+    const date = new Date(bucketMs);
+    const total = counts.success + counts.failure;
+    const successRate = total > 0 ? Math.round((counts.success / total) * 1000) / 10 : 0;
+    const failureRate = total > 0 ? Math.round((counts.failure / total) * 1000) / 10 : 0;
+    const hh = String(date.getHours()).padStart(2, '0');
+    const mm = String(date.getMinutes()).padStart(2, '0');
+
+    points.push({
+      minuteIso: date.toISOString(),
+      minuteLabel: `${hh}:${mm}`,
+      successCount: counts.success,
+      failureCount: counts.failure,
+      successRate,
+      failureRate,
+    });
+  }
+
+  return points;
 }
 
 function getConfig(): SimulatorConfigDto {
@@ -147,12 +238,188 @@ function getConfig(): SimulatorConfigDto {
     .prepare('SELECT key, value FROM simulation_config')
     .all() as Array<{ key: string; value: string }>;
   const map = new Map(rows.map((r) => [r.key, r.value]));
+  const parsedMax = Number(map.get('max_retry_attempts') ?? '5');
+  const maxRetryAttempts =
+    Number.isFinite(parsedMax) && parsedMax >= 1 ? Math.min(50, Math.trunc(parsedMax)) : 5;
 
   return {
     queueAvailable: (map.get('queue_available') ?? 'true') === 'true',
     inventoryMode: (map.get('inventory_mode') as InventoryMode) ?? 'intermittent',
     workerRunning: (map.get('worker_running') ?? 'true') === 'true',
     workerInstanceId: map.get('worker_instance_id') ?? 'worker-net10-01',
+    maxRetryAttempts,
+  };
+}
+
+function getWebhookConfig(): WebhookConfigDto {
+  const row = db.prepare('SELECT * FROM webhook_config WHERE id = 1').get() as Record<
+    string,
+    unknown
+  >;
+  return {
+    enabled: Number(row.enabled) === 1,
+    endpointUrl: String(row.endpoint_url ?? ''),
+    hmacSecret: String(row.hmac_secret ?? ''),
+    notifyOnEstoqueReservado: Number(row.notify_estoque_reservado) === 1,
+    notifyOnPedidoAbortado: Number(row.notify_pedido_abortado) === 1,
+    updatedAtUtc: String(row.updated_at_utc),
+  };
+}
+
+function getWebhookDeliveries(): WebhookDeliveryDto[] {
+  const rows = db
+    .prepare('SELECT * FROM webhook_deliveries ORDER BY created_at_utc DESC LIMIT 25')
+    .all() as Array<Record<string, unknown>>;
+
+  return rows.map((r) => ({
+    id: r.id as string,
+    orderId: (r.order_id as string | null) ?? null,
+    eventType: r.event_type as WebhookDeliveryDto['eventType'],
+    targetUrl: r.target_url as string,
+    payloadJson: r.payload_json as string,
+    signatureHeader: (r.signature_header as string | null) ?? null,
+    httpStatus: r.http_status === null || r.http_status === undefined ? null : Number(r.http_status),
+    success: Number(r.success) === 1,
+    durationMs: Number(r.duration_ms),
+    responsePreview: (r.response_preview as string | null) ?? null,
+    errorMessage: (r.error_message as string | null) ?? null,
+    createdAtUtc: r.created_at_utc as string,
+  }));
+}
+
+async function dispatchWebhookNotification(
+  eventType: 'EstoqueReservado' | 'PedidoAbortado' | 'WebhookTest',
+  orderId: string | null,
+  customerName: string,
+  totalAmount: number,
+  items: Array<{ productName: string; quantity: number; unitPrice: number }>,
+  options?: { overrideUrl?: string; overrideSecret?: string; forceSend?: boolean }
+): Promise<WebhookDeliveryDto | null> {
+  const cfg = getWebhookConfig();
+  const targetUrl = (options?.overrideUrl ?? cfg.endpointUrl).trim();
+  const hmacSecret = (options?.overrideSecret ?? cfg.hmacSecret).trim();
+
+  if (!options?.forceSend) {
+    if (!cfg.enabled || !targetUrl) return null;
+    if (eventType === 'EstoqueReservado' && !cfg.notifyOnEstoqueReservado) return null;
+    if (eventType === 'PedidoAbortado' && !cfg.notifyOnPedidoAbortado) return null;
+  }
+
+  if (!targetUrl) {
+    throw new Error('A URL de endpoint do Webhook é obrigatória.');
+  }
+
+  const resolvedUrl = targetUrl.startsWith('/')
+    ? `http://127.0.0.1:${PORT}${targetUrl}`
+    : targetUrl;
+
+  const occurredAtUtc = new Date().toISOString();
+  const payloadJson = JSON.stringify({
+    eventType,
+    orderId,
+    customerName,
+    totalAmount,
+    occurredAtUtc,
+    items,
+  });
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-OrderReservation-Event': eventType,
+  };
+
+  let signatureHeader: string | null = null;
+  if (hmacSecret) {
+    const digest = crypto.createHmac('sha256', hmacSecret).update(payloadJson).digest('hex');
+    signatureHeader = `sha256=${digest}`;
+    headers['X-OrderReservation-Signature'] = signatureHeader;
+  }
+
+  const deliveryId = crypto.randomUUID();
+  const startedAt = Date.now();
+  let httpStatus: number | null = null;
+  let success = false;
+  let responsePreview: string | null = null;
+  let errorMessage: string | null = null;
+
+  try {
+    const response = await fetch(resolvedUrl, {
+      method: 'POST',
+      headers,
+      body: payloadJson,
+      signal: AbortSignal.timeout(5000),
+    });
+
+    httpStatus = response.status;
+    success = response.ok;
+    const rawText = await response.text();
+    responsePreview = rawText.slice(0, 400);
+    if (!response.ok) {
+      errorMessage = `HTTP ${response.status} ${response.statusText}`.trim();
+    }
+  } catch (err) {
+    errorMessage = err instanceof Error ? err.message : 'Erro desconhecido ao enviar Webhook.';
+  }
+
+  const durationMs = Date.now() - startedAt;
+  const createdAtUtc = new Date().toISOString();
+
+  db.prepare(
+    `INSERT INTO webhook_deliveries
+     (id, order_id, event_type, target_url, payload_json, signature_header, http_status, success, duration_ms, response_preview, error_message, created_at_utc)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    deliveryId,
+    orderId,
+    eventType,
+    targetUrl,
+    payloadJson,
+    signatureHeader,
+    httpStatus,
+    success ? 1 : 0,
+    durationMs,
+    responsePreview,
+    errorMessage,
+    createdAtUtc
+  );
+
+  db.exec(
+    'DELETE FROM webhook_deliveries WHERE id NOT IN (SELECT id FROM webhook_deliveries ORDER BY created_at_utc DESC LIMIT 50)'
+  );
+
+  if (success) {
+    writeLog(
+      'INFO',
+      'API',
+      orderId,
+      `Webhook ${eventType} entregue com sucesso para ${targetUrl} (HTTP ${httpStatus} · ${durationMs}ms).`,
+      'WEBHOOK_DELIVERY_SUCCEEDED',
+      { eventType, targetUrl, httpStatus, durationMs, signed: Boolean(signatureHeader) }
+    );
+  } else {
+    writeLog(
+      'ERROR',
+      'API',
+      orderId,
+      `Falha ao entregar Webhook ${eventType} para ${targetUrl}: ${errorMessage ?? 'Erro HTTP'}.`,
+      'WEBHOOK_DELIVERY_FAILED',
+      { eventType, targetUrl, httpStatus, durationMs, error: errorMessage }
+    );
+  }
+
+  return {
+    id: deliveryId,
+    orderId,
+    eventType,
+    targetUrl,
+    payloadJson,
+    signatureHeader,
+    httpStatus,
+    success,
+    durationMs,
+    responsePreview,
+    errorMessage,
+    createdAtUtc,
   };
 }
 
@@ -251,7 +518,8 @@ function seedDemoDataIfEmpty() {
       order1Id,
       `Pedido gravado com stamp PedidoCriado (Mariana Costa · 2 itens · R$ 919,80). Outbox criada na mesma transação SQLite.`,
       'ORDER_CREATED',
-      { customerName: 'Mariana Costa', itemCount: 2, totalAmount: 919.8, outboxCreated: true }
+      { customerName: 'Mariana Costa', itemCount: 2, totalAmount: 919.8, outboxCreated: true },
+      t1
     );
     writeLog(
       'INFO',
@@ -259,7 +527,8 @@ function seedDemoDataIfEmpty() {
       order1Id,
       `Estoque reservado com sucesso para Mariana Costa (R$ 919,80).`,
       'INVENTORY_DISPATCH_SUCCEEDED',
-      { attemptNumber: 1, durationMs: 42 }
+      { attemptNumber: 1, durationMs: 42 },
+      t1
     );
     writeLog(
       'ERROR',
@@ -267,7 +536,8 @@ function seedDemoDataIfEmpty() {
       order2Id,
       `Falha 503 simulada ao reservar estoque. Retry #1 agendado para +60 segundos.`,
       'INVENTORY_DISPATCH_FAILED',
-      { attemptNumber: 1, retryDelaySeconds: 60, nextRetryAtUtc: retryAt }
+      { attemptNumber: 1, retryDelaySeconds: 60, nextRetryAtUtc: retryAt },
+      t2
     );
     writeLog(
       'WARN',
@@ -275,7 +545,8 @@ function seedDemoDataIfEmpty() {
       order3Id,
       `Pedido criado como PedidoAbortado. Nenhuma mensagem gerada na Outbox; estoque não notificado.`,
       'ORDER_CREATED',
-      { customerName: 'Lucas Ferreira', itemCount: 1, totalAmount: 380, status: 'PedidoAbortado', outboxCreated: false }
+      { customerName: 'Lucas Ferreira', itemCount: 1, totalAmount: 380, status: 'PedidoAbortado', outboxCreated: false },
+      t3
     );
   } catch (err) {
     db.exec('ROLLBACK;');
@@ -410,23 +681,54 @@ function runWorkerCycle() {
 
     // 1. Check Message Queue availability
     if (!config.queueAvailable) {
-      const nextRetry = new Date(Date.now() + RETRY_DELAY_MS).toISOString();
+      const nextRetryCount = msg.retryCount + 1;
       const errMsg = 'Message queue simulada está fora do ar (SimulateOutage=true).';
-      db.prepare(
-        `UPDATE outbox_messages
-         SET status = 'FailedWaitingRetry', retry_count = retry_count + 1,
-             next_retry_at_utc = ?, last_error = ?, locked_by = NULL, locked_until_utc = NULL
-         WHERE id = ?`
-      ).run(nextRetry, errMsg, msg.id);
 
-      writeLog(
-        'ERROR',
-        'MessageQueue',
-        msg.orderId,
-        `[${config.workerInstanceId}] Fila indisponível. Retentativa #${msg.retryCount + 1} agendada em 60s.`,
-        'INVENTORY_DISPATCH_FAILED',
-        { workerId: config.workerInstanceId, attemptNumber: msg.retryCount + 1, retryDelaySeconds: 60, nextRetryAtUtc: nextRetry }
-      );
+      if (nextRetryCount >= config.maxRetryAttempts) {
+        db.prepare(
+          `UPDATE outbox_messages
+           SET status = 'DeadLetter', retry_count = ?, next_retry_at_utc = NULL,
+               last_error = ?, locked_by = NULL, locked_until_utc = NULL
+           WHERE id = ?`
+        ).run(nextRetryCount, errMsg, msg.id);
+
+        writeLog(
+          'ERROR',
+          'MessageQueue',
+          msg.orderId,
+          `[${config.workerInstanceId}] Limite máximo de retentativas (${nextRetryCount}/${config.maxRetryAttempts}) atingido com fila indisponível. Mensagem movida para DeadLetter.`,
+          'OUTBOX_MAX_RETRIES_EXCEEDED',
+          {
+            workerId: config.workerInstanceId,
+            attemptNumber: nextRetryCount,
+            maxRetryAttempts: config.maxRetryAttempts,
+            error: errMsg,
+          }
+        );
+      } else {
+        const nextRetry = new Date(Date.now() + RETRY_DELAY_MS).toISOString();
+        db.prepare(
+          `UPDATE outbox_messages
+           SET status = 'FailedWaitingRetry', retry_count = ?,
+               next_retry_at_utc = ?, last_error = ?, locked_by = NULL, locked_until_utc = NULL
+           WHERE id = ?`
+        ).run(nextRetryCount, nextRetry, errMsg, msg.id);
+
+        writeLog(
+          'ERROR',
+          'MessageQueue',
+          msg.orderId,
+          `[${config.workerInstanceId}] Fila indisponível. Retentativa #${nextRetryCount}/${config.maxRetryAttempts} agendada em 60s.`,
+          'INVENTORY_DISPATCH_FAILED',
+          {
+            workerId: config.workerInstanceId,
+            attemptNumber: nextRetryCount,
+            maxRetryAttempts: config.maxRetryAttempts,
+            retryDelaySeconds: 60,
+            nextRetryAtUtc: nextRetry,
+          }
+        );
+      }
       continue;
     }
 
@@ -476,24 +778,58 @@ function runWorkerCycle() {
     );
 
     if (shouldFailInventory) {
-      const nextRetry = new Date(Date.now() + RETRY_DELAY_MS).toISOString();
+      const nextRetryCount = msg.retryCount + 1;
       const durationMs = Date.now() - attemptStarted;
       const errMsg = `MockInventoryGateway: 503 Service Unavailable (${config.inventoryMode}).`;
-      db.prepare(
-        `UPDATE outbox_messages
-         SET status = 'FailedWaitingRetry', retry_count = retry_count + 1,
-             next_retry_at_utc = ?, last_error = ?, locked_by = NULL, locked_until_utc = NULL
-         WHERE id = ?`
-      ).run(nextRetry, errMsg, msg.id);
 
-      writeLog(
-        'ERROR',
-        'InventoryMock',
-        msg.orderId,
-        `[${config.workerInstanceId}] Falha ao notificar sistema de estoque. Retentativa #${msg.retryCount + 1} agendada para +60s.`,
-        'INVENTORY_DISPATCH_FAILED',
-        { workerId: config.workerInstanceId, attemptNumber: msg.retryCount + 1, durationMs, retryDelaySeconds: 60, nextRetryAtUtc: nextRetry, error: errMsg }
-      );
+      if (nextRetryCount >= config.maxRetryAttempts) {
+        db.prepare(
+          `UPDATE outbox_messages
+           SET status = 'DeadLetter', retry_count = ?, next_retry_at_utc = NULL,
+               last_error = ?, locked_by = NULL, locked_until_utc = NULL
+           WHERE id = ?`
+        ).run(nextRetryCount, errMsg, msg.id);
+
+        writeLog(
+          'ERROR',
+          'InventoryMock',
+          msg.orderId,
+          `[${config.workerInstanceId}] Limite máximo de retentativas (${nextRetryCount}/${config.maxRetryAttempts}) atingido ao notificar estoque. Movido para DeadLetter.`,
+          'OUTBOX_MAX_RETRIES_EXCEEDED',
+          {
+            workerId: config.workerInstanceId,
+            attemptNumber: nextRetryCount,
+            maxRetryAttempts: config.maxRetryAttempts,
+            durationMs,
+            error: errMsg,
+          }
+        );
+      } else {
+        const nextRetry = new Date(Date.now() + RETRY_DELAY_MS).toISOString();
+        db.prepare(
+          `UPDATE outbox_messages
+           SET status = 'FailedWaitingRetry', retry_count = ?,
+               next_retry_at_utc = ?, last_error = ?, locked_by = NULL, locked_until_utc = NULL
+           WHERE id = ?`
+        ).run(nextRetryCount, nextRetry, errMsg, msg.id);
+
+        writeLog(
+          'ERROR',
+          'InventoryMock',
+          msg.orderId,
+          `[${config.workerInstanceId}] Falha ao notificar sistema de estoque. Retentativa #${nextRetryCount}/${config.maxRetryAttempts} agendada para +60s.`,
+          'INVENTORY_DISPATCH_FAILED',
+          {
+            workerId: config.workerInstanceId,
+            attemptNumber: nextRetryCount,
+            maxRetryAttempts: config.maxRetryAttempts,
+            durationMs,
+            retryDelaySeconds: 60,
+            nextRetryAtUtc: nextRetry,
+            error: errMsg,
+          }
+        );
+      }
       continue;
     }
 
@@ -544,6 +880,22 @@ function runWorkerCycle() {
         `[${config.workerInstanceId}] Estoque reservado com sucesso para ${orderRow.customer_name} (R$ ${Number(orderRow.total_amount).toFixed(2)}).`,
         'INVENTORY_DISPATCH_SUCCEEDED',
         { workerId: config.workerInstanceId, attemptNumber: msg.retryCount + 1, durationMs, completedAtUtc: doneIso }
+      );
+
+      const orderItems = db
+        .prepare('SELECT product_name, quantity, unit_price FROM order_items WHERE order_id = ?')
+        .all(msg.orderId) as Array<{ product_name: string; quantity: number; unit_price: number }>;
+
+      void dispatchWebhookNotification(
+        'EstoqueReservado',
+        msg.orderId,
+        String(orderRow.customer_name),
+        Number(orderRow.total_amount),
+        orderItems.map((i) => ({
+          productName: i.product_name,
+          quantity: Number(i.quantity),
+          unitPrice: Number(i.unit_price),
+        }))
       );
     } catch (err) {
       db.exec('ROLLBACK;');
@@ -716,6 +1068,20 @@ async function bootstrap() {
         { customerName: customerName.trim(), itemCount: normalizedItems.length, totalAmount, status, outboxCreated: !isAborted }
       );
 
+      if (isAborted) {
+        void dispatchWebhookNotification(
+          'PedidoAbortado',
+          orderId,
+          customerName.trim(),
+          totalAmount,
+          normalizedItems.map((i) => ({
+            productName: i.productName,
+            quantity: i.quantity,
+            unitPrice: i.unitPrice,
+          }))
+        );
+      }
+
       const createdRow = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId) as Record<
         string,
         unknown
@@ -797,7 +1163,19 @@ async function bootstrap() {
         string,
         unknown
       >;
-      return res.json(mapOrderRow(updatedRow));
+      const mapped = mapOrderRow(updatedRow);
+      void dispatchWebhookNotification(
+        'PedidoAbortado',
+        orderId,
+        mapped.customerName,
+        mapped.totalAmount,
+        mapped.items.map((i) => ({
+          productName: i.productName,
+          quantity: i.quantity,
+          unitPrice: i.unitPrice,
+        }))
+      );
+      return res.json(mapped);
     } catch (err) {
       db.exec('ROLLBACK;');
       throw err;
@@ -847,16 +1225,38 @@ async function bootstrap() {
           detailsJson: (l.details_json as string | null) ?? null,
         })
       ),
+      inventoryMetrics30m: buildInventoryMetrics30m(),
+      webhookConfig: getWebhookConfig(),
+      webhookDeliveries: getWebhookDeliveries(),
       config: getConfig(),
       serverUtcNow: new Date().toISOString(),
     });
   });
 
   app.post('/api/simulator/config', (req, res) => {
-    const { queueAvailable, inventoryMode, workerRunning } = req.body ?? {};
+    const { queueAvailable, inventoryMode, workerRunning, maxRetryAttempts } = req.body ?? {};
     const upsert = db.prepare(
       'INSERT OR REPLACE INTO simulation_config (key, value) VALUES (?, ?)'
     );
+
+    if (maxRetryAttempts !== undefined) {
+      const parsed = Number(maxRetryAttempts);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 50) {
+        return res.status(400).json({
+          title: 'Configuração inválida',
+          detail: 'O limite máximo de retentativas deve ser um número inteiro entre 1 e 50.',
+        });
+      }
+      upsert.run('max_retry_attempts', String(parsed));
+      writeLog(
+        'INFO',
+        'Worker',
+        null,
+        `Limite máximo de retentativas do Worker atualizado para ${parsed} tentativa(s) e persistido no SQLite.`,
+        'WORKER_CONFIG_UPDATED',
+        { maxRetryAttempts: parsed }
+      );
+    }
 
     if (typeof queueAvailable === 'boolean') {
       upsert.run('queue_available', String(queueAvailable));
@@ -913,6 +1313,30 @@ async function bootstrap() {
     }
 
     return res.json({ updated: result.changes > 0 });
+  });
+
+  app.post('/api/simulator/requeue/:orderId', (req, res) => {
+    const result = db
+      .prepare(
+        `UPDATE outbox_messages
+         SET status = 'Pending', retry_count = 0, next_retry_at_utc = NULL,
+             last_error = NULL, locked_by = NULL, locked_until_utc = NULL
+         WHERE order_id = ? AND status = 'DeadLetter'`
+      )
+      .run(req.params.orderId);
+
+    if (result.changes > 0) {
+      writeLog(
+        'INFO',
+        'Worker',
+        req.params.orderId,
+        'Mensagem DeadLetter reenfileirada manualmente pelo operador com contador de tentativas zerado.',
+        'OUTBOX_REQUEUED',
+        { orderId: req.params.orderId }
+      );
+    }
+
+    return res.json({ requeued: result.changes > 0 });
   });
 
   app.post('/api/simulator/test-concurrency/:orderId', (req, res) => {
@@ -983,9 +1407,103 @@ async function bootstrap() {
     });
   });
 
+  app.post('/api/simulator/webhook/config', (req, res) => {
+    const {
+      enabled,
+      endpointUrl,
+      hmacSecret,
+      notifyOnEstoqueReservado,
+      notifyOnPedidoAbortado,
+    } = req.body ?? {};
+
+    const current = getWebhookConfig();
+    const nextEnabled = typeof enabled === 'boolean' ? enabled : current.enabled;
+    const nextUrl = typeof endpointUrl === 'string' ? endpointUrl.trim() : current.endpointUrl;
+    const nextSecret = typeof hmacSecret === 'string' ? hmacSecret : current.hmacSecret;
+    const nextEstoque =
+      typeof notifyOnEstoqueReservado === 'boolean'
+        ? notifyOnEstoqueReservado
+        : current.notifyOnEstoqueReservado;
+    const nextAbort =
+      typeof notifyOnPedidoAbortado === 'boolean'
+        ? notifyOnPedidoAbortado
+        : current.notifyOnPedidoAbortado;
+
+    db.prepare(
+      `UPDATE webhook_config
+       SET enabled = ?, endpoint_url = ?, hmac_secret = ?, notify_estoque_reservado = ?, notify_pedido_abortado = ?, updated_at_utc = ?
+       WHERE id = 1`
+    ).run(
+      nextEnabled ? 1 : 0,
+      nextUrl,
+      nextSecret,
+      nextEstoque ? 1 : 0,
+      nextAbort ? 1 : 0,
+      new Date().toISOString()
+    );
+
+    writeLog(
+      'INFO',
+      'API',
+      null,
+      `Configuração de Webhook atualizada (Ativo=${nextEnabled}, URL=${nextUrl || 'não definida'}).`,
+      'WEBHOOK_CONFIG_UPDATED',
+      { enabled: nextEnabled, endpointUrl: nextUrl, hasSecret: Boolean(nextSecret) }
+    );
+
+    return res.json(getWebhookConfig());
+  });
+
+  app.post('/api/simulator/webhook/test', async (req, res) => {
+    const { endpointUrl, hmacSecret } = req.body ?? {};
+    try {
+      const delivery = await dispatchWebhookNotification(
+        'WebhookTest',
+        crypto.randomUUID(),
+        'Teste de Integração Webhook',
+        199.9,
+        [{ productName: 'Item de Teste Webhook', quantity: 1, unitPrice: 199.9 }],
+        {
+          overrideUrl: typeof endpointUrl === 'string' ? endpointUrl : undefined,
+          overrideSecret: typeof hmacSecret === 'string' ? hmacSecret : undefined,
+          forceSend: true,
+        }
+      );
+      return res.json(delivery);
+    } catch (err) {
+      return res.status(400).json({
+        detail: err instanceof Error ? err.message : 'Falha ao disparar teste de Webhook.',
+      });
+    }
+  });
+
+  app.post('/api/simulator/webhook-sink', (req, res) => {
+    const cfg = getWebhookConfig();
+    const signatureHeader = req.header('x-orderreservation-signature');
+    const eventHeader = req.header('x-orderreservation-event') ?? req.body?.eventType ?? 'Unknown';
+    let signatureVerified: boolean | null = null;
+
+    if (cfg.hmacSecret) {
+      const expected = `sha256=${crypto
+        .createHmac('sha256', cfg.hmacSecret)
+        .update(JSON.stringify(req.body))
+        .digest('hex')}`;
+      signatureVerified = signatureHeader === expected;
+    }
+
+    return res.status(200).json({
+      received: true,
+      eventType: eventHeader,
+      orderId: req.body?.orderId ?? null,
+      signatureVerified,
+      receivedAtUtc: new Date().toISOString(),
+    });
+  });
+
   app.post('/api/simulator/reset', (req, res) => {
     const withSeed = req.body?.seed !== false;
     db.exec(`
+      DELETE FROM webhook_deliveries;
       DELETE FROM worker_logs;
       DELETE FROM message_queue;
       DELETE FROM outbox_messages;

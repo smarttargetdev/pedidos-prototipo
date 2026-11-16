@@ -76,4 +76,42 @@ public static partial class StructuredLogEvents
         this ILogger logger,
         string workerId,
         Guid orderId);
+
+    [LoggerMessage(
+        EventId = 3001,
+        Level = LogLevel.Information,
+        Message = "[WEBHOOK_DELIVERY_SUCCEEDED] Evento={EventType} | Pedido={OrderId} | Url={EndpointUrl} | HttpStatus={HttpStatus} | DuracaoMs={DurationMs}")]
+    public static partial void WebhookDeliverySucceeded(
+        this ILogger logger,
+        string eventType,
+        Guid? orderId,
+        string endpointUrl,
+        int httpStatus,
+        long durationMs);
+
+    [LoggerMessage(
+        EventId = 3002,
+        Level = LogLevel.Error,
+        Message = "[WEBHOOK_DELIVERY_FAILED] Evento={EventType} | Pedido={OrderId} | Url={EndpointUrl} | DuracaoMs={DurationMs} | Erro={ErrorMessage}")]
+    public static partial void WebhookDeliveryFailed(
+        this ILogger logger,
+        Exception? exception,
+        string eventType,
+        Guid? orderId,
+        string endpointUrl,
+        long durationMs,
+        string errorMessage);
+
+    [LoggerMessage(
+        EventId = 2005,
+        Level = LogLevel.Error,
+        Message = "[OUTBOX_MAX_RETRIES_EXCEEDED] Worker={WorkerId} | Pedido={OrderId} | Tentativas={AttemptCount}/{MaxRetryAttempts} | Erro={ErrorMessage}")]
+    public static partial void OutboxMaxRetriesExceeded(
+        this ILogger logger,
+        Exception exception,
+        string workerId,
+        Guid orderId,
+        int attemptCount,
+        int maxRetryAttempts,
+        string errorMessage);
 }

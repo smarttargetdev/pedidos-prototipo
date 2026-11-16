@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   Code2,
@@ -12,12 +12,16 @@ import {
   Search,
   Trash2,
   X,
+  RotateCw,
 } from 'lucide-react';
 import type { InventoryMode, OrderDto, SimulatorStateDto } from './types';
 import { OrderStatusText, OutboxStatusText } from './components/StatusText';
 import { OrderDetailModal } from './components/OrderDetailModal';
 import { CreateAndQueryView } from './components/CreateAndQueryView';
 import { DotnetCodeExplorer } from './components/DotnetCodeExplorer';
+import { InventoryMetricsChart } from './components/InventoryMetricsChart';
+import { OperationalAlerts, type OperationalAlert } from './components/OperationalAlerts';
+import { WebhookSettingsPanel } from './components/WebhookSettingsPanel';
 
 type ActiveTab = 'overview' | 'orders-api' | 'dotnet-code';
 type StatusFilter = 'ALL' | 'PedidoCriado' | 'EstoqueReservado' | 'PedidoAbortado';
@@ -35,6 +39,26 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [logLevelFilter, setLogLevelFilter] = useState<LogLevelFilter>('ALL');
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
+  const [alerts, setAlerts] = useState<OperationalAlert[]>([]);
+  const [customRetryLimit, setCustomRetryLimit] = useState<string>('5');
+  const [retryLimitSavedMsg, setRetryLimitSavedMsg] = useState<string | null>(null);
+  const [retryLimitError, setRetryLimitError] = useState<string | null>(null);
+
+  const initializedAlertsRef = useRef(false);
+  const seenAbortedIdsRef = useRef<Set<string>>(new Set());
+  const lastSeenErrorLogIdRef = useRef<number>(0);
+  const lastErrorBurstAlertAtRef = useRef<number>(0);
+
+  const dismissAlert = useCallback((alertId: string) => {
+    setAlerts((prev) => prev.filter((a) => a.id !== alertId));
+  }, []);
+
+  const pushAlert = useCallback((alert: OperationalAlert, ttlMs: number) => {
+    setAlerts((prev) => [alert, ...prev].slice(0, 4));
+    setTimeout(() => {
+      setAlerts((prev) => prev.filter((a) => a.id !== alert.id));
+    }, ttlMs);
+  }, []);
 
   const fetchState = useCallback(async () => {
     try {
@@ -48,6 +72,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (state?.config.maxRetryAttempts !== undefined) {
+      setCustomRetryLimit(String(state.config.maxRetryAttempts));
+    }
+  }, [state?.config.maxRetryAttempts]);
+
+  useEffect(() => {
     fetchState();
     const poll = setInterval(fetchState, 2000);
     const clock = setInterval(() => setNowMs(Date.now()), 1000);
@@ -57,17 +87,100 @@ export default function App() {
     };
   }, [fetchState]);
 
+  useEffect(() => {
+    if (!state) return;
+
+    const abortedOrders = state.orders.filter((o) => o.status === 'PedidoAbortado');
+    const errorLogs = state.logs.filter((l) => l.level === 'ERROR');
+    const maxErrorId = errorLogs.reduce((max, l) => Math.max(max, l.id), 0);
+
+    // Baseline existing records on initial load so no arrival banners fire prematurely
+    if (!initializedAlertsRef.current) {
+      initializedAlertsRef.current = true;
+      seenAbortedIdsRef.current = new Set(abortedOrders.map((o) => o.id));
+      lastSeenErrorLogIdRef.current = maxErrorId;
+      return;
+    }
+
+    // 1. Detect newly aborted orders
+    for (const order of abortedOrders) {
+      if (!seenAbortedIdsRef.current.has(order.id)) {
+        seenAbortedIdsRef.current.add(order.id);
+        pushAlert(
+          {
+            id: `aborted-${order.id}-${Date.now()}`,
+            kind: 'aborted-order',
+            title: 'Novo pedido abortado',
+            message: `Pedido ${order.id.slice(0, 8)}... (${order.customerName}) marcado como PedidoAbortado. O estoque não será avisado.`,
+            createdAtMs: Date.now(),
+            orderId: order.id,
+          },
+          10_000
+        );
+      }
+    }
+
+    // 2. Detect multiple worker processing errors within a short 60s window
+    const hasNewErrors = errorLogs.some((l) => l.id > lastSeenErrorLogIdRef.current);
+    if (hasNewErrors) {
+      lastSeenErrorLogIdRef.current = Math.max(lastSeenErrorLogIdRef.current, maxErrorId);
+      const cutoffMs = Date.now() - 60_000;
+      const recentWorkerErrors = errorLogs.filter(
+        (l) =>
+          (l.source === 'Worker' || l.source === 'MessageQueue' || l.source === 'InventoryMock') &&
+          new Date(l.timestampUtc).getTime() >= cutoffMs
+      );
+
+      if (
+        recentWorkerErrors.length >= 2 &&
+        Date.now() - lastErrorBurstAlertAtRef.current >= 15_000
+      ) {
+        lastErrorBurstAlertAtRef.current = Date.now();
+        pushAlert(
+          {
+            id: `error-burst-${Date.now()}`,
+            kind: 'worker-error-burst',
+            title: 'Múltiplos erros no processamento do Worker',
+            message: `${recentWorkerErrors.length} falhas registradas nos últimos 60 segundos ao enviar para fila ou estoque. Retentativas automáticas em +60s.`,
+            createdAtMs: Date.now(),
+          },
+          12_000
+        );
+      }
+    }
+  }, [state, pushAlert]);
+
   const updateConfig = async (patch: {
     queueAvailable?: boolean;
     inventoryMode?: InventoryMode;
     workerRunning?: boolean;
+    maxRetryAttempts?: number;
   }) => {
-    await fetch('/api/simulator/config', {
+    setRetryLimitError(null);
+    const res = await fetch('/api/simulator/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      setRetryLimitError(err.detail ?? 'Falha ao salvar configuração.');
+      return;
+    }
+    if (patch.maxRetryAttempts !== undefined) {
+      setRetryLimitSavedMsg(`Salvo (${patch.maxRetryAttempts})`);
+      setTimeout(() => setRetryLimitSavedMsg(null), 2200);
+    }
     await fetchState();
+  };
+
+  const handleSaveCustomRetryLimit = async () => {
+    const parsed = Number(customRetryLimit);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 50) {
+      setRetryLimitError('Informe um número inteiro entre 1 e 50.');
+      return;
+    }
+    await updateConfig({ maxRetryAttempts: parsed });
   };
 
   const handleAbortOrder = async (orderId: string) => {
@@ -77,6 +190,11 @@ export default function App() {
 
   const handleAdvanceRetry = async (orderId: string) => {
     await fetch(`/api/simulator/advance-retry/${encodeURIComponent(orderId)}`, { method: 'POST' });
+    await fetchState();
+  };
+
+  const handleRequeueOrder = async (orderId: string) => {
+    await fetch(`/api/simulator/requeue/${encodeURIComponent(orderId)}`, { method: 'POST' });
     await fetchState();
   };
 
@@ -91,6 +209,11 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ seed }),
     });
+    initializedAlertsRef.current = false;
+    seenAbortedIdsRef.current.clear();
+    lastSeenErrorLogIdRef.current = 0;
+    lastErrorBurstAlertAtRef.current = 0;
+    setAlerts([]);
     setSelectedOrderId(null);
     await fetchState();
   };
@@ -203,14 +326,25 @@ export default function App() {
                 key={item.id}
                 type="button"
                 onClick={() => setActiveTab(item.id)}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 text-sm rounded-lg transition-colors whitespace-nowrap ${
+                className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 text-sm rounded-lg transition-colors whitespace-nowrap ${
                   active
                     ? 'bg-slate-900 text-white font-medium'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
                 }`}
               >
-                <Icon className="w-4 h-4 shrink-0" aria-hidden="true" />
-                <span>{item.label}</span>
+                <span className="flex items-center gap-3 min-w-0">
+                  <Icon className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>{item.label}</span>
+                </span>
+                {item.id === 'overview' && alerts.length > 0 && (
+                  <span
+                    className={`px-1.5 py-0.5 text-[11px] font-mono tabular-nums rounded ${
+                      active ? 'bg-red-500 text-white' : 'bg-red-100 text-red-700'
+                    }`}
+                  >
+                    {alerts.length}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -302,6 +436,15 @@ export default function App() {
         <main className="flex-1 p-6 max-w-7xl w-full mx-auto space-y-6">
           {activeTab === 'overview' && (
             <>
+              {/* Temporary Operational Alert Banners */}
+              {alerts.length > 0 && (
+                <OperationalAlerts
+                  alerts={alerts}
+                  onDismiss={dismissAlert}
+                  onInspectOrder={(orderId) => setSelectedOrderId(orderId)}
+                />
+              )}
+
               {/* Summary Metrics Strip */}
               <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                 <div className="bg-white border border-slate-200 rounded-xl p-4">
@@ -429,6 +572,67 @@ export default function App() {
                       )}
                     </button>
                   </div>
+
+                  {/* Max Worker Retry Limit */}
+                  <div>
+                    <div className="flex items-center gap-2 text-xs font-medium text-slate-700 mb-1.5">
+                      <span>Limite de Retentativas (Worker)</span>
+                      {retryLimitSavedMsg && (
+                        <span className="text-[11px] font-medium text-emerald-700">
+                          · {retryLimitSavedMsg}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="inline-flex p-0.5 bg-slate-100 rounded-lg border border-slate-200">
+                        {([3, 5, 10] as const).map((preset) => {
+                          const active = state?.config.maxRetryAttempts === preset;
+                          return (
+                            <button
+                              key={preset}
+                              type="button"
+                              onClick={() => updateConfig({ maxRetryAttempts: preset })}
+                              className={`px-2.5 py-1 text-xs font-mono font-medium rounded-md transition-colors whitespace-nowrap tabular-nums ${
+                                active
+                                  ? 'bg-white text-slate-900 shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              {preset}x
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="inline-flex items-center gap-1">
+                        <input
+                          type="number"
+                          min={1}
+                          max={50}
+                          aria-label="Limite personalizado de retentativas"
+                          value={customRetryLimit}
+                          onChange={(e) => setCustomRetryLimit(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              void handleSaveCustomRetryLimit();
+                            }
+                          }}
+                          className="w-16 px-2 py-1 text-xs font-mono tabular-nums border border-slate-200 rounded-lg bg-white focus:outline-none focus:border-blue-600"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleSaveCustomRetryLimit}
+                          className="px-2.5 py-1 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 whitespace-nowrap"
+                        >
+                          Aplicar
+                        </button>
+                      </div>
+                    </div>
+                    {retryLimitError && (
+                      <div className="mt-1 text-[11px] text-red-700">{retryLimitError}</div>
+                    )}
+                  </div>
                 </div>
 
                 <div className="flex items-center gap-2 shrink-0">
@@ -450,6 +654,9 @@ export default function App() {
                   </button>
                 </div>
               </section>
+
+              {/* 30-Minute Inventory Processing Line Chart */}
+              <InventoryMetricsChart data={state?.inventoryMetrics30m ?? []} />
 
               {/* Orders & Outbox Table */}
               <section className="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -571,7 +778,8 @@ export default function App() {
                                       secondsRemaining={retrySecs}
                                     />
                                     <div className="text-[11px] text-slate-500 font-mono tabular-nums">
-                                      Tentativas: {order.outbox.retryCount}
+                                      Tentativas: {order.outbox.retryCount} /{' '}
+                                      {state?.config.maxRetryAttempts ?? 5}
                                     </div>
                                   </div>
                                 ) : (
@@ -589,6 +797,16 @@ export default function App() {
                                       className="px-2.5 py-1 text-xs font-medium text-amber-800 bg-amber-50 border border-amber-200 rounded hover:bg-amber-100 whitespace-nowrap"
                                     >
                                       Adiantar 60s
+                                    </button>
+                                  )}
+                                  {order.outbox?.status === 'DeadLetter' && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRequeueOrder(order.id)}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-blue-800 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 whitespace-nowrap"
+                                    >
+                                      <RotateCw className="w-3 h-3" aria-hidden="true" />
+                                      Reenfileirar
                                     </button>
                                   )}
                                   {order.status === 'PedidoCriado' && (
@@ -742,6 +960,13 @@ export default function App() {
                   </div>
                 </section>
               </div>
+
+              {/* Webhook Settings & Delivery History */}
+              <WebhookSettingsPanel
+                config={state?.webhookConfig}
+                deliveries={state?.webhookDeliveries ?? []}
+                onRefresh={fetchState}
+              />
             </>
           )}
 
@@ -761,9 +986,11 @@ export default function App() {
         <OrderDetailModal
           order={selectedOrder}
           nowMs={nowMs}
+          maxRetryAttempts={state?.config.maxRetryAttempts ?? 5}
           onClose={() => setSelectedOrderId(null)}
           onAbort={handleAbortOrder}
           onAdvanceRetry={handleAdvanceRetry}
+          onRequeue={handleRequeueOrder}
           onTestConcurrency={handleTestConcurrency}
         />
       )}

@@ -21,6 +21,7 @@ public sealed class OrderService(
     IOutboxRepository outboxRepository,
     IUnitOfWork unitOfWork,
     IDateTimeProvider clock,
+    IWebhookNotifier webhookNotifier,
     ILogger<OrderService> logger) : IOrderService
 {
     public async Task<OrderResponse> CreateOrderAsync(CreateOrderRequest request, CancellationToken cancellationToken)
@@ -75,6 +76,11 @@ public sealed class OrderService(
                 outboxMessage is not null);
         }
 
+        if (request.Abortado)
+        {
+            await DispatchWebhookSafelyAsync(order, nameof(OrderStatus.PedidoAbortado), utcNow, cancellationToken);
+        }
+
         return MapToResponse(order, outboxMessage);
     }
 
@@ -111,7 +117,40 @@ public sealed class OrderService(
             logger.OrderAborted(orderId, abortedAt, outbox is not null);
         }
 
+        await DispatchWebhookSafelyAsync(order!, nameof(OrderStatus.PedidoAbortado), abortedAt, cancellationToken);
+
         return MapToResponse(order!, outbox);
+    }
+
+    private async Task DispatchWebhookSafelyAsync(
+        Order order,
+        string eventType,
+        DateTime occurredAtUtc,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var notification = new WebhookNotification(
+                order.Id,
+                eventType,
+                order.CustomerName,
+                order.TotalAmount,
+                occurredAtUtc,
+                order.Items.Select(i => new InventoryReservationItem(
+                    i.ProductName,
+                    i.Quantity,
+                    i.UnitPrice)).ToList());
+
+            await webhookNotifier.NotifyAsync(notification, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                ex,
+                "Falha não bloqueante ao notificar webhook para Pedido {OrderId} ({EventType}).",
+                order.Id,
+                eventType);
+        }
     }
 
     private static OrderResponse MapToResponse(Order order, OutboxMessage? outbox)

@@ -6,5 +6,6 @@ public enum OutboxStatus
     Processing = 2,
     Dispatched = 3,
     FailedWaitingRetry = 4,
-    Cancelled = 5
+    Cancelled = 5,
+    DeadLetter = 6
 }

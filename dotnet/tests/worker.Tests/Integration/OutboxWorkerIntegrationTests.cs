@@ -39,6 +39,17 @@ internal sealed class StaticOptionsMonitor<T>(T currentValue) : IOptionsMonitor<
     public IDisposable? OnChange(Action<T, string?> listener) => null;
 }
 
+internal sealed class SpyWebhookNotifier : IWebhookNotifier
+{
+    public List<WebhookNotification> SentNotifications { get; } = [];
+
+    public Task NotifyAsync(WebhookNotification notification, CancellationToken cancellationToken)
+    {
+        SentNotifications.Add(notification);
+        return Task.CompletedTask;
+    }
+}
+
 public sealed class OutboxWorkerIntegrationTests : IAsyncLifetime
 {
     private readonly string _dbPath = Path.Combine(
@@ -52,6 +63,7 @@ public sealed class OutboxWorkerIntegrationTests : IAsyncLifetime
     private OrderService _orderService = null!;
     private OutboxProcessorService _processor = null!;
     private OutboxRepository _outboxRepo = null!;
+    private SpyWebhookNotifier _webhookSpy = null!;
 
     public async Task InitializeAsync()
     {
@@ -65,6 +77,7 @@ public sealed class OutboxWorkerIntegrationTests : IAsyncLifetime
 
         _clock = new MutableDateTimeProvider(new DateTime(2026, 11, 16, 12, 0, 0, DateTimeKind.Utc));
         _inventoryGateway = new ControllableInventoryGateway();
+        _webhookSpy = new SpyWebhookNotifier();
         _messageQueue = new SimulatedMessageQueue(
             new StaticOptionsMonitor<SimulatedQueueOptions>(new SimulatedQueueOptions { SimulateOutage = false }),
             NullLogger<SimulatedMessageQueue>.Instance);
@@ -78,6 +91,7 @@ public sealed class OutboxWorkerIntegrationTests : IAsyncLifetime
             _outboxRepo,
             uow,
             _clock,
+            _webhookSpy,
             NullLogger<OrderService>.Instance);
 
         _processor = new OutboxProcessorService(
@@ -87,6 +101,7 @@ public sealed class OutboxWorkerIntegrationTests : IAsyncLifetime
             _inventoryGateway,
             uow,
             _clock,
+            _webhookSpy,
             NullLogger<OutboxProcessorService>.Instance);
     }
 
@@ -138,6 +153,7 @@ public sealed class OutboxWorkerIntegrationTests : IAsyncLifetime
         var completed = await _orderService.GetOrderByIdAsync(created.Id, CancellationToken.None);
         Assert.Equal(nameof(OrderStatus.EstoqueReservado), completed.Status);
         Assert.Equal(nameof(OutboxStatus.Dispatched), completed.Outbox!.Status);
+        Assert.Contains(_webhookSpy.SentNotifications, n => n.OrderId == created.Id && n.EventType == nameof(OrderStatus.EstoqueReservado));
     }
 
     [Fact]

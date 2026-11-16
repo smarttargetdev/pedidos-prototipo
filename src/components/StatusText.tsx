@@ -1,4 +1,4 @@
-import { CheckCircle2, Clock, Ban, AlertTriangle, Loader2 } from 'lucide-react';
+import { CheckCircle2, Clock, Ban, AlertTriangle, AlertOctagon, Loader2 } from 'lucide-react';
 import type { OrderStatus, OutboxStatus } from '../types';
 
 export function OrderStatusText({ status }: { status: OrderStatus }) {
@@ -49,6 +49,15 @@ export function OutboxStatusText({
       <span className="inline-flex items-center gap-1.5 text-xs font-medium text-red-700 whitespace-nowrap">
         <Ban className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
         Cancelada (Abortado)
+      </span>
+    );
+  }
+
+  if (status === 'DeadLetter') {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-red-700 whitespace-nowrap">
+        <AlertOctagon className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+        Limite Atingido (DeadLetter)
       </span>
     );
   }

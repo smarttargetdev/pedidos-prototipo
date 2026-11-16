@@ -1,23 +1,27 @@
 import { useState } from 'react';
-import { X, Copy, Check, ShieldCheck, Ban, FastForward } from 'lucide-react';
+import { X, Copy, Check, ShieldCheck, Ban, FastForward, RotateCw } from 'lucide-react';
 import type { OrderDto } from '../types';
 import { OrderStatusText, OutboxStatusText } from './StatusText';
 
 interface OrderDetailModalProps {
   order: OrderDto;
   nowMs: number;
+  maxRetryAttempts: number;
   onClose: () => void;
   onAbort: (orderId: string) => Promise<void>;
   onAdvanceRetry: (orderId: string) => Promise<void>;
+  onRequeue: (orderId: string) => Promise<void>;
   onTestConcurrency: (orderId: string) => Promise<void>;
 }
 
 export function OrderDetailModal({
   order,
   nowMs,
+  maxRetryAttempts,
   onClose,
   onAbort,
   onAdvanceRetry,
+  onRequeue,
   onTestConcurrency,
 }: OrderDetailModalProps) {
   const [copied, setCopied] = useState(false);
@@ -154,7 +158,7 @@ export function OrderDetailModal({
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <OutboxStatusText status={order.outbox.status} secondsRemaining={retrySeconds} />
                   <span className="font-mono tabular-nums text-slate-500">
-                    Tentativas: {order.outbox.retryCount}
+                    Tentativas: {order.outbox.retryCount} / {maxRetryAttempts}
                   </span>
                 </div>
                 {order.outbox.lastError && (
@@ -204,6 +208,17 @@ export function OrderDetailModal({
               >
                 <FastForward className="w-3.5 h-3.5" />
                 Adiantar Timer (60s)
+              </button>
+            )}
+            {order.outbox?.status === 'DeadLetter' && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => onRequeue(order.id)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-blue-800 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 whitespace-nowrap shrink-0"
+              >
+                <RotateCw className="w-3.5 h-3.5" />
+                Reenfileirar Outbox
               </button>
             )}
           </div>

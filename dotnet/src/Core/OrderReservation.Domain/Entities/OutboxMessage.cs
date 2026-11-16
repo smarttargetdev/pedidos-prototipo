@@ -43,12 +43,39 @@ public sealed class OutboxMessage
         NextRetryAtUtc = null;
     }
 
-    public void ScheduleRetry(DateTime utcNow, TimeSpan retryDelay, string errorMessage)
+    public void ScheduleRetry(
+        DateTime utcNow,
+        TimeSpan retryDelay,
+        string errorMessage,
+        int maxRetryAttempts = 5)
     {
-        Status = OutboxStatus.FailedWaitingRetry;
         RetryCount++;
-        NextRetryAtUtc = utcNow.Add(retryDelay);
         LastError = errorMessage;
+        LockedBy = null;
+        LockedUntilUtc = null;
+
+        if (maxRetryAttempts > 0 && RetryCount >= maxRetryAttempts)
+        {
+            Status = OutboxStatus.DeadLetter;
+            NextRetryAtUtc = null;
+            return;
+        }
+
+        Status = OutboxStatus.FailedWaitingRetry;
+        NextRetryAtUtc = utcNow.Add(retryDelay);
+    }
+
+    public void Requeue()
+    {
+        if (Status == OutboxStatus.Dispatched)
+        {
+            return;
+        }
+
+        Status = OutboxStatus.Pending;
+        RetryCount = 0;
+        NextRetryAtUtc = null;
+        LastError = null;
         LockedBy = null;
         LockedUntilUtc = null;
     }

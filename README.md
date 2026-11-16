@@ -79,28 +79,95 @@ Solução completa em **.NET 10** (`api` e `worker`) estruturada com princípios
 │  • POST /api/orders/{id}/abort  │     │  • Verifica se não foi Abortado │
 │  • Cálculo de total no servidor │     │  • Envio via IMessageQueue      │
 │  • Transação ACID (Order+Outbox)│     │  • Retry fixo de 60s em falha   │
-└──────────────┬──────────────────┘     └────────┬───────────────┬────────┘
-               │                                 │               │
-               ▼                                 ▼               ▼
-┌─────────────────────────────────┐     ┌──────────────┐ ┌────────────────┐
-│     BANCO RELACIONAL SQLITE     │     │ IMessageQueue│ │ Estoque Mock   │
-│  (EF Core 10 + Fluent API)      │     │ (Idempotente │ │ (IInventory    │
-│                                 │     │  por OrderId)│ │  Gateway com   │
-│  [Orders] ◄── 1:N ── [Items]    │     └──────────────┘ │  falha simul.) │
+│  • Notifica Webhook (Abortado)  │     │  • Notifica Webhook (Reservado) │
+└──────────────┬──────────────────┘     └────────┬───────┬───────┬────────┘
+               │                                 │       │       │
+               ▼                                 ▼       ▼       ▼
+┌─────────────────────────────────┐     ┌──────────────┐ ┌────────────────┐ ┌─────────────────┐
+│     BANCO RELACIONAL SQLITE     │     │ IMessageQueue│ │ Estoque Mock   │ │ IWebhookNotifier│
+│  (EF Core 10 + Fluent API)      │     │ (Idempotente │ │ (IInventory    │ │ (POST + HMAC    │
+│                                 │     │  por OrderId)│ │  Gateway com   │ │  SHA-256 opc.)  │
+│  [Orders] ◄── 1:N ── [Items]    │     └──────────────┘ │  falha simul.) │ └─────────────────┘
 │  [OutboxMessages] (Lock/Retry)  │                      └────────────────┘
+│  [WebhookConfig / Deliveries]   │
 └─────────────────────────────────┘
 ```
 
 ### Modelo de Dados e Estados
 
 - **Pedido (`Order`)**: `Id (Guid PK)`, `CustomerName`, `CustomerEmail`, `TotalAmount (decimal calculado)`, `Status` (`PedidoCriado` | `PedidoAbortado` | `EstoqueReservado`), `CreatedAtUtc` (stamp de criação), `UpdatedAtUtc`, e coleção de `OrderItems` (`ProductName`, `Quantity`, `UnitPrice`, `Subtotal`).
-- **Mensagem Outbox (`OutboxMessage`)**: `Id (Guid PK)`, `OrderId (Guid UNIQUE)`, `EventType` (`PedidoCriado`), `PayloadJson`, `Status` (`Pending` | `Processing` | `Dispatched` | `FailedWaitingRetry` | `Cancelled`), `RetryCount`, `NextRetryAtUtc`, `LockedBy`, `LockedUntilUtc`, `LastError`, `CreatedAtUtc`, `DispatchedAtUtc`.
+- **Mensagem Outbox (`OutboxMessage`)**: `Id (Guid PK)`, `OrderId (Guid UNIQUE)`, `EventType` (`PedidoCriado`), `PayloadJson`, `Status` (`Pending` | `Processing` | `Dispatched` | `FailedWaitingRetry` | `Cancelled` | `DeadLetter`), `RetryCount`, `NextRetryAtUtc`, `LockedBy`, `LockedUntilUtc`, `LastError`, `CreatedAtUtc`, `DispatchedAtUtc`.
 - **Registro da Fila (`QueueEnvelope`)**: Armazena `MessageId`, `OrderId (UNIQUE)` e `Status` para assegurar unicidade na message queue e visibilidade no painel.
+- **Webhook (`webhook_config` e `webhook_deliveries`)**: Armazena no simulador a configuração ativa (`enabled`, `endpoint_url`, `hmac_secret`, filtros `EstoqueReservado`/`PedidoAbortado`) e o histórico das últimas entregas com status HTTP, latência (`duration_ms`), cabeçalho HMAC, payload e prévia da resposta.
 
 ### Mapeamento de Interações e Fluxos no Painel
 
 - **Formulário de Novo Pedido**: Valida cliente e itens dinamicamente, calcula o total em tempo real, permite marcar "Criar como pedido abortado" e envia `POST /api/orders`, atualizando imediatamente a tabela de pedidos e o Outbox.
 - **Busca por Identificador Único**: Input de `Guid` que consulta `GET /api/orders/{id}` e exibe o detalhamento completo dos itens, stamp `PedidoCriado` e histórico de entrega.
 - **Ação Abortar Pedido**: Botão contextual em pedidos ainda não enviados ao estoque que dispara `POST /api/orders/{id}/abort`, transitando o status para `PedidoAbortado` e cancelando o despacho na Outbox.
-- **Controles de Caos do Ambiente**: Chaves para simular **Fila Indisponível** e **Sistema de Estoque Instável/Fora do Ar**, fazendo o worker registrar falhas nos logs e iniciar o cronômetro visível de **60 segundos** para retentativa (com botão opcional "Avançar 60s" apenas no simulador para facilitar testes manuais rápidos, mantendo o timer real de 60s como padrão).
-- **Explorador de Código `.NET 10`**: Leitura direta dos arquivos reais da solução `.NET 10` gerada no workspace, organizada por projetos (`api`, `worker`, `domain/application/infrastructure`) com cópia e download.
+- **Controles de Caos e Resiliência do Ambiente**: Chaves para simular **Fila Indisponível** e **Sistema de Estoque Instável/Fora do Ar**, além de seletor persistido em SQLite para configurar o **Limite Máximo de Retentativas do Worker** (`3`, `5`, `10` ou valor customizado de `1` a `50`). Ao atingir o limite, a mensagem transita para `DeadLetter` (com ação opcional de reenfileiramento manual) e registra `[OUTBOX_MAX_RETRIES_EXCEEDED]`.
+- **Explorador de Código `.NET 10`**: Leitura direta dos arquivos reais da solução `.NET 10` gerada no workspace, organizada por projetos (`api`, `worker`, `domain/application/infrastructure`, `tests`) com cópia e download.
+
+---
+
+## 5. Observabilidade, Métricas e Alertas Operacionais
+
+- **Logging Estruturado (`.NET 10` + Simulador Web)**:
+  - Nos projetos `.NET 10` (`api` e `worker`), o pipeline utiliza **Serilog** com saída em Console estruturado e arquivos NDJSON rotativos (`logs/api-*.ndjson`, `logs/worker-*.ndjson`), combinado com source generators **`[LoggerMessage]`** e catálogo centralizado `StructuredLogEvents` (`ORDER_CREATED`, `ORDER_ABORTED`, `INVENTORY_DISPATCH_ATTEMPT`, `INVENTORY_DISPATCH_SUCCEEDED`, `INVENTORY_DISPATCH_FAILED`, `OUTBOX_SKIPPED_ABORTED`, `WEBHOOK_DELIVERY_SUCCEEDED`, `WEBHOOK_DELIVERY_FAILED`).
+  - No simulador web, cada evento é persistido na tabela `worker_logs` com `event_code` e `details_json` estruturados.
+- **Exportação de Logs (`Exportar Logs`)**:
+  - O painel de Logs Estruturados oferece filtros por origem/nível e o botão **Exportar Logs**, que gera e baixa um arquivo `.json` contendo exatamente os registros filtrados no momento para análise offline.
+- **Gráfico de Desempenho em Tempo Real (`Recharts`)**:
+  - O componente `InventoryMetricsChart` agrega os eventos dos últimos **30 minutos** em janelas por minuto (`inventoryMetrics30m`), exibindo curvas de taxa de sucesso (%) vs. falhas (%) no processamento de estoque, além de totais e contagens no tooltip.
+- **Alertas Visuais Temporários (`OperationalAlerts`)**:
+  - Banners no Painel Operacional notificam automaticamente quando novos pedidos entram em `PedidoAbortado` ou quando o Worker registra múltiplos erros de processamento em curto intervalo (`>= 2` falhas em 60 segundos), com dispensação manual e expiração automática.
+
+---
+
+## 6. Integração por Webhook (`EstoqueReservado` e `PedidoAbortado`)
+
+- **Configurações de Webhook no Painel Operacional (`WebhookSettingsPanel`)**:
+  - Permite ativar/desativar notificações externas, informar a **URL de endpoint** (com atalho para o **Receptor Simulado Integrado** em `/api/simulator/webhook-sink`), selecionar os eventos desejados (`EstoqueReservado` e `PedidoAbortado`) e definir opcionalmente um **Segredo HMAC-SHA256**.
+  - Inclui disparo imediato pelo botão **Testar Webhook** (`POST /api/simulator/webhook/test`) e tabela de **Histórico de Entregas** com expansão de payload, assinatura e resposta HTTP.
+- **Execução HTTP POST Real e Segurança**:
+  - Após o commit das transações no SQLite, o servidor dispara requisições `HTTP POST` reais com timeout de 5 segundos de forma **não bloqueante** (falhas no endpoint parceiro não revertem pedidos nem reservas).
+  - Quando o segredo HMAC está preenchido, o payload JSON é assinado e enviado no cabeçalho `X-OrderReservation-Signature: sha256=<hex>`, acompanhado de `X-OrderReservation-Event`. O receptor integrado valida a assinatura e devolve `signatureVerified: true|false`.
+- **Implementação Espelhada no `.NET 10`**:
+  - Interface `IWebhookNotifier` na camada `OrderReservation.Application`, acionada por `OrderService` (quando `PedidoAbortado`) e `OutboxProcessorService` (quando `EstoqueReservado`).
+  - Implementação `HttpWebhookNotifier` na camada `OrderReservation.Infrastructure` utilizando `IHttpClientFactory`, `HMACSHA256` e opções tipadas `WebhookOptions` configuradas nos `appsettings.json` da `api` e do `worker`.
+
+---
+
+## 7. Suíte de Testes `.NET 10` e Execução Local
+
+- **Cobertura de Testes xUnit (`dotnet/tests/`)**:
+  - `api.Tests`: Testes unitários de validação e regras de domínio (`OrderValidationTests`) e testes de integração com SQLite verificando `POST /api/orders`, `GET /api/orders/{id}`, `POST /api/orders/{id}/abort` e criação atômica da Outbox (`OrdersApiIntegrationTests`).
+  - `worker.Tests`: Testes unitários da lógica do `OutboxProcessorService` (`OutboxProcessorServiceTests`) e testes de integração completos com SQLite simulando fila, envio mockado ao estoque, cenário de falha com agendamento de retentativa de 60s, pedidos abortados e disparo de `IWebhookNotifier` (`OutboxWorkerIntegrationTests`).
+- **Como executar localmente**:
+  - **Simulador Web (Node.js 22+)**:
+    ```bash
+    npm install
+    npm run dev
+    ```
+    Acesse `http://localhost:3000`.
+  - **Solução .NET 10 (em ambiente com SDK .NET 10 instalado)**:
+    ```bash
+    dotnet test dotnet/OrderReservation.sln
+    dotnet run --project dotnet/src/api
+    dotnet run --project dotnet/src/worker
+    ```
+
+---
+
+## 8. Histórico Incremental de Evoluções
+
+| Versão | Incremento | Resumo Técnico |
+| :--- | :--- | :--- |
+| **v1.0** | Base `.NET 10` + Simulador Web | Solução `api` e `worker` em `.NET 10` com EF Core 10 + SQLite, Transactional Outbox, lock/lease, retentativa fixa de 60s, tratamento de `PedidoAbortado` e explorador de código. |
+| **v1.1** | Observabilidade e Exportação | Logging estruturado com Serilog (NDJSON) e `[LoggerMessage]` no `.NET 10`; colunas `event_code` e `details_json` no simulador e botão **Exportar Logs** em JSON. |
+| **v1.2** | Suíte de Testes `.NET 10` | Criação dos projetos `api.Tests` e `worker.Tests` em xUnit com testes unitários e de integração SQLite cobrindo validação, persistência, Outbox, falhas e retentativas. |
+| **v1.3** | Métricas Recharts e Alertas | Gráfico de linhas de 30 minutos (`Recharts`) comparando sucesso vs. falhas no estoque e banners de alerta temporários para novos abortamentos e rajadas de erros do Worker. |
+| **v1.4** | Webhooks + HMAC-SHA256 | Seção **Configurações de Webhook** no Painel Operacional com `HTTP POST` real, receptor integrado `/api/simulator/webhook-sink`, assinatura `HMAC-SHA256`, histórico de entregas e `IWebhookNotifier` / `HttpWebhookNotifier` no `.NET 10`. |
+| **v1.5** | Limite de Retentativas (`DeadLetter`) | Controle no Painel Operacional para configurar o limite máximo de retentativas do Worker (`3`, `5`, `10` ou personalizado) persistido em SQLite (`max_retry_attempts`), transição automática para `DeadLetter`, reenfileiramento manual (`/api/simulator/requeue/:orderId`) e `IOutboxRetryPolicy` / `OutboxWorkerOptions` no `.NET 10`. |
+
+

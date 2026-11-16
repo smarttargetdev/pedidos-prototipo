@@ -15,6 +15,7 @@ public sealed class OutboxProcessorServiceTests
     private readonly Mock<IInventoryGateway> _inventoryMock = new();
     private readonly Mock<IUnitOfWork> _uowMock = new();
     private readonly Mock<IDateTimeProvider> _clockMock = new();
+    private readonly Mock<IWebhookNotifier> _webhookMock = new();
     private readonly DateTime _nowUtc = new(2026, 11, 16, 18, 0, 0, DateTimeKind.Utc);
 
     public OutboxProcessorServiceTests()
@@ -23,14 +24,16 @@ public sealed class OutboxProcessorServiceTests
         _uowMock.Setup(u => u.SaveChangesAsync(It.IsAny<CancellationToken>())).ReturnsAsync(1);
     }
 
-    private OutboxProcessorService CreateSut() => new(
+    private OutboxProcessorService CreateSut(IOutboxRetryPolicy? retryPolicy = null) => new(
         _outboxRepoMock.Object,
         _orderRepoMock.Object,
         _queueMock.Object,
         _inventoryMock.Object,
         _uowMock.Object,
         _clockMock.Object,
-        NullLogger<OutboxProcessorService>.Instance);
+        _webhookMock.Object,
+        NullLogger<OutboxProcessorService>.Instance,
+        retryPolicy);
 
     [Fact]
     public async Task ProcessPendingBatch_ShouldReserveInventoryAndMarkDispatched_WhenSuccessful()
@@ -56,6 +59,9 @@ public sealed class OutboxProcessorServiceTests
             It.Is<InventoryReservationCommand>(c => c.OrderId == order.Id),
             It.IsAny<CancellationToken>()), Times.Once);
         _queueMock.Verify(q => q.AcknowledgeAsync(order.Id, It.IsAny<CancellationToken>()), Times.Once);
+        _webhookMock.Verify(w => w.NotifyAsync(
+            It.Is<WebhookNotification>(n => n.OrderId == order.Id && n.EventType == nameof(OrderStatus.EstoqueReservado)),
+            It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -127,5 +133,35 @@ public sealed class OutboxProcessorServiceTests
         Assert.Equal(1, outbox.RetryCount);
         Assert.Equal(_nowUtc.AddSeconds(60), outbox.NextRetryAtUtc);
         _inventoryMock.Verify(g => g.ReserveAsync(It.IsAny<InventoryReservationCommand>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ProcessPendingBatch_ShouldTransitionToDeadLetter_WhenMaxRetryAttemptsReached()
+    {
+        var order = Order.Create("Bruno", "bruno@loja.com.br", [("Cadeira", 1, 950m)], false, _nowUtc);
+        var outbox = OutboxMessage.CreatePedidoCriado(order.Id, "{}", _nowUtc);
+        outbox.ScheduleRetry(_nowUtc.AddMinutes(-2), TimeSpan.FromSeconds(60), "Erro 1", maxRetryAttempts: 3);
+        outbox.ScheduleRetry(_nowUtc.AddMinutes(-1), TimeSpan.FromSeconds(60), "Erro 2", maxRetryAttempts: 3);
+
+        var policyMock = new Mock<IOutboxRetryPolicy>();
+        policyMock.Setup(p => p.MaxRetryAttempts).Returns(3);
+
+        _outboxRepoMock
+            .Setup(r => r.AcquirePendingBatchAsync("worker-1", 10, _nowUtc, It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync([outbox]);
+        _outboxRepoMock.Setup(r => r.GetByOrderIdAsync(order.Id, It.IsAny<CancellationToken>())).ReturnsAsync(outbox);
+        _orderRepoMock.Setup(r => r.GetByIdAsync(order.Id, It.IsAny<CancellationToken>())).ReturnsAsync(order);
+        _queueMock
+            .Setup(q => q.EnqueueUniqueAsync(It.IsAny<QueueMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new EnqueueResult(true, false, "OK"));
+        _inventoryMock
+            .Setup(g => g.ReserveAsync(It.IsAny<InventoryReservationCommand>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new HttpRequestException("503 Service Unavailable"));
+
+        await CreateSut(policyMock.Object).ProcessPendingBatchAsync("worker-1", 10, CancellationToken.None);
+
+        Assert.Equal(OutboxStatus.DeadLetter, outbox.Status);
+        Assert.Equal(3, outbox.RetryCount);
+        Assert.Null(outbox.NextRetryAtUtc);
     }
 }

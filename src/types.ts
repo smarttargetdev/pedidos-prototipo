@@ -5,7 +5,8 @@ export type OutboxStatus =
   | 'Processing'
   | 'Dispatched'
   | 'FailedWaitingRetry'
-  | 'Cancelled';
+  | 'Cancelled'
+  | 'DeadLetter';
 
 export type InventoryMode = 'healthy' | 'failing' | 'intermittent';
 
@@ -69,6 +70,40 @@ export interface SimulatorConfigDto {
   inventoryMode: InventoryMode;
   workerRunning: boolean;
   workerInstanceId: string;
+  maxRetryAttempts: number;
+}
+
+export interface InventoryMetricPointDto {
+  minuteIso: string;
+  minuteLabel: string;
+  successCount: number;
+  failureCount: number;
+  successRate: number;
+  failureRate: number;
+}
+
+export interface WebhookConfigDto {
+  enabled: boolean;
+  endpointUrl: string;
+  hmacSecret: string;
+  notifyOnEstoqueReservado: boolean;
+  notifyOnPedidoAbortado: boolean;
+  updatedAtUtc: string;
+}
+
+export interface WebhookDeliveryDto {
+  id: string;
+  orderId: string | null;
+  eventType: 'EstoqueReservado' | 'PedidoAbortado' | 'WebhookTest';
+  targetUrl: string;
+  payloadJson: string;
+  signatureHeader: string | null;
+  httpStatus: number | null;
+  success: boolean;
+  durationMs: number;
+  responsePreview: string | null;
+  errorMessage: string | null;
+  createdAtUtc: string;
 }
 
 export interface SimulatorStateDto {
@@ -76,6 +111,9 @@ export interface SimulatorStateDto {
   outboxMessages: OutboxSummaryDto[];
   queueRecords: QueueRecordDto[];
   logs: WorkerLogDto[];
+  inventoryMetrics30m: InventoryMetricPointDto[];
+  webhookConfig: WebhookConfigDto;
+  webhookDeliveries: WebhookDeliveryDto[];
   config: SimulatorConfigDto;
   serverUtcNow: string;
 }

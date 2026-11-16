@@ -18,10 +18,13 @@ public sealed class OutboxProcessorService(
     IInventoryGateway inventoryGateway,
     IUnitOfWork unitOfWork,
     IDateTimeProvider clock,
-    ILogger<OutboxProcessorService> logger) : IOutboxProcessorService
+    IWebhookNotifier webhookNotifier,
+    ILogger<OutboxProcessorService> logger,
+    IOutboxRetryPolicy? retryPolicy = null) : IOutboxProcessorService
 {
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan LockDuration = TimeSpan.FromSeconds(30);
+    private int MaxRetryAttempts => Math.Max(1, retryPolicy?.MaxRetryAttempts ?? 5);
 
     public async Task<int> ProcessPendingBatchAsync(
         string workerId,
@@ -127,23 +130,58 @@ public sealed class OutboxProcessorService(
                 attemptNumber,
                 stopwatch.ElapsedMilliseconds,
                 completedAt);
+
+            try
+            {
+                await webhookNotifier.NotifyAsync(
+                    new WebhookNotification(
+                        order.Id,
+                        nameof(OrderStatus.EstoqueReservado),
+                        order.CustomerName,
+                        order.TotalAmount,
+                        completedAt,
+                        command.Items),
+                    cancellationToken);
+            }
+            catch (Exception webhookEx) when (webhookEx is not OperationCanceledException)
+            {
+                logger.LogWarning(
+                    webhookEx,
+                    "[{WorkerId}] Falha não bloqueante ao enviar webhook EstoqueReservado para Pedido {OrderId}.",
+                    workerId,
+                    orderId);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             stopwatch.Stop();
             var retryNow = clock.UtcNow;
-            message.ScheduleRetry(retryNow, RetryDelay, ex.Message);
+            var maxAttempts = MaxRetryAttempts;
+            message.ScheduleRetry(retryNow, RetryDelay, ex.Message, maxAttempts);
             await unitOfWork.SaveChangesAsync(cancellationToken);
 
-            logger.InventoryDispatchFailedAndRetryScheduled(
-                ex,
-                workerId,
-                orderId,
-                message.RetryCount,
-                stopwatch.ElapsedMilliseconds,
-                message.NextRetryAtUtc,
-                (int)RetryDelay.TotalSeconds,
-                ex.Message);
+            if (message.Status == OutboxStatus.DeadLetter)
+            {
+                logger.OutboxMaxRetriesExceeded(
+                    ex,
+                    workerId,
+                    orderId,
+                    message.RetryCount,
+                    maxAttempts,
+                    ex.Message);
+            }
+            else
+            {
+                logger.InventoryDispatchFailedAndRetryScheduled(
+                    ex,
+                    workerId,
+                    orderId,
+                    message.RetryCount,
+                    stopwatch.ElapsedMilliseconds,
+                    message.NextRetryAtUtc,
+                    (int)RetryDelay.TotalSeconds,
+                    ex.Message);
+            }
         }
     }
 }
