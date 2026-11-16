@@ -9,6 +9,8 @@ namespace api.Controllers;
 public sealed class OrdersController(IOrderService orderService) : ControllerBase
 {
     [HttpPost]
+    [EndpointSummary("Criar pedido")]
+    [EndpointDescription("Registra um novo pedido com itens detalhados, calcula o total no servidor, aplica o stamp PedidoCriado e grava a mensagem na Transactional Outbox (exceto quando cancelado=true).")]
     [ProducesResponseType<OrderResponse>(StatusCodes.Status201Created)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<OrderResponse>> CreateOrder(
@@ -20,6 +22,8 @@ public sealed class OrdersController(IOrderService orderService) : ControllerBas
     }
 
     [HttpGet("{id:guid}")]
+    [EndpointSummary("Consultar pedido por ID")]
+    [EndpointDescription("Retorna os dados completos de um pedido pelo seu identificador único (Guid), incluindo itens e status atual da Outbox.")]
     [ProducesResponseType<OrderResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<OrderResponse>> GetOrderById(
@@ -32,6 +36,8 @@ public sealed class OrdersController(IOrderService orderService) : ControllerBas
 
     [HttpPost("{id:guid}/cancel")]
     [HttpPost("{id:guid}/abort")]
+    [EndpointSummary("Cancelar pedido antes do envio ao estoque")]
+    [EndpointDescription("Altera o status do pedido para PedidoCancelado e cancela a mensagem pendente na Outbox, impedindo a notificação ao estoque.")]
     [ProducesResponseType<OrderResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]

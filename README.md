@@ -138,10 +138,11 @@ Solução completa em **.NET 10** (`api` e `worker`) estruturada com princípios
 
 ---
 
-## 7. Suíte de Testes `.NET 10` e Execução Local
+## 7. Documentação da API e Suíte de Testes `.NET 10`
 
+- **Documentação Completa da API**: Consulte [`API.md`](./API.md) para detalhes de configuração do **Swagger UI / OpenAPI 3.1** (`/swagger` e `/openapi/v1.json`), contratos `POST /api/orders`, `GET /api/orders/{id}`, `POST /api/orders/{id}/cancel`, payloads de **Webhook** e endpoints operacionais do simulador.
 - **Cobertura de Testes xUnit (`dotnet/tests/`)**:
-  - `api.Tests`: Testes unitários de validação e regras de domínio (`OrderValidationTests`) e testes de integração com SQLite verificando `POST /api/orders`, `GET /api/orders/{id}`, `POST /api/orders/{id}/cancel` e criação atômica da Outbox (`OrdersApiIntegrationTests`).
+  - `api.Tests`: Testes unitários de validação e regras de domínio (`OrderValidationTests`) e testes de integração com SQLite verificando `POST /api/orders`, `GET /api/orders/{id}`, `POST /api/orders/{id}/cancel`, criação atômica da Outbox e disponibilidade de `/openapi/v1.json` + `/swagger/index.html` (`OrdersApiIntegrationTests`).
   - `worker.Tests`: Testes unitários da lógica do `OutboxProcessorService` (`OutboxProcessorServiceTests`) e testes de integração completos com SQLite simulando fila, envio mockado ao estoque, cenário de falha com agendamento de retentativa de 60s, pedidos cancelados e disparo de `IWebhookNotifier` (`OutboxWorkerIntegrationTests`).
 - **Como executar localmente**:
   - **Simulador Web (Node.js 22+)**:
@@ -156,6 +157,7 @@ Solução completa em **.NET 10** (`api` e `worker`) estruturada com princípios
     dotnet run --project dotnet/src/api
     dotnet run --project dotnet/src/worker
     ```
+    Após iniciar a `api`, acesse o Swagger UI em `http://localhost:5150/swagger` e o contrato OpenAPI em `http://localhost:5150/openapi/v1.json`.
 
 ---
 
@@ -170,5 +172,7 @@ Solução completa em **.NET 10** (`api` e `worker`) estruturada com princípios
 | **v1.4** | Webhooks + HMAC-SHA256 | Seção **Configurações de Webhook** no Painel Operacional com `HTTP POST` real, receptor integrado `/api/simulator/webhook-sink`, assinatura `HMAC-SHA256`, histórico de entregas e `IWebhookNotifier` / `HttpWebhookNotifier` no `.NET 10`. |
 | **v1.5** | Limite de Retentativas (`DeadLetter`) | Controle no Painel Operacional para configurar o limite máximo de retentativas do Worker (`3`, `5`, `10` ou personalizado) persistido em SQLite (`max_retry_attempts`), transição automática para `DeadLetter`, reenfileiramento manual (`/api/simulator/requeue/:orderId`) e `IOutboxRetryPolicy` / `OutboxWorkerOptions` no `.NET 10`. |
 | **v1.6** | Status `PedidoCancelado` | Renomeação do status `PedidoAbortado` para `PedidoCancelado` em toda a stack (UI, simulador SQLite com migração automática de dados legados, endpoint `/cancel`, webhooks, logs estruturados, código `.NET 10` e testes xUnit). |
+| **v1.7** | Swagger / OpenAPI + Docs da API | Habilitação explícita de `Swashbuckle.AspNetCore.SwaggerUI` (`/swagger`) e OpenAPI 3.1 (`/openapi/v1.json`) via `Swagger:Enabled` no `.NET 10`, metadados `[EndpointSummary]`/`[EndpointDescription]` e teste de integração Swagger. |
+| **v1.8** | Extração para `API.md` | Movimentação da especificação completa de endpoints, exemplos JSON, webhooks e rotas do simulador do `README.md` para o arquivo dedicado `API.md`. |
 
 

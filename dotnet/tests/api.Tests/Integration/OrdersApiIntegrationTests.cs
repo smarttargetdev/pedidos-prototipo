@@ -146,4 +146,17 @@ public sealed class OrdersApiIntegrationTests(OrdersApiWebFactory factory)
         var response = await _client.PostAsJsonAsync("/api/orders", payload);
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
+
+    [Fact]
+    public async Task SwaggerAndOpenApi_ShouldBeEnabledAndAccessible()
+    {
+        var openApiResponse = await _client.GetAsync("/openapi/v1.json");
+        Assert.Equal(HttpStatusCode.OK, openApiResponse.StatusCode);
+
+        var openApiJson = await openApiResponse.Content.ReadAsStringAsync();
+        Assert.Contains("/api/orders", openApiJson);
+
+        var swaggerResponse = await _client.GetAsync("/swagger/index.html");
+        Assert.Equal(HttpStatusCode.OK, swaggerResponse.StatusCode);
+    }
 }

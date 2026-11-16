@@ -7,7 +7,7 @@ Solução completa em **.NET 10** (`net10.0`) composta pelos projetos **api** e 
 - **OrderReservation.Domain**: Entidades `Order`, `OrderItem`, `OutboxMessage` e enums `OrderStatus` (`PedidoCriado`, `PedidoCancelado`, `EstoqueReservado`) e `OutboxStatus`.
 - **OrderReservation.Application**: Casos de uso (`OrderService`, `OutboxProcessorService`) e abstrações (`IOrderRepository`, `IOutboxRepository`, `IUnitOfWork`, `IMessageQueue`, `IInventoryGateway`, `IWebhookNotifier`, `IOutboxRetryPolicy`).
 - **OrderReservation.Infrastructure**: `AppDbContext` (EF Core 10 + SQLite em modo WAL), configurações Fluent API com índice `UNIQUE` em `OrderId`, aquisição atômica de lease via `ExecuteUpdateAsync`, `SimulatedMessageQueue` idempotente e `MockInventoryGateway` com falha simulada.
-- **api**: Web API REST (`POST /api/orders`, `GET /api/orders/{id}`, `POST /api/orders/{id}/cancel`).
+- **api**: Web API REST (`POST /api/orders`, `GET /api/orders/{id}`, `POST /api/orders/{id}/cancel`) com documentação OpenAPI 3.1 (`/openapi/v1.json`) e interface **Swagger UI** habilitada em `/swagger`.
 - **worker**: `BackgroundService` (`OutboxBackgroundWorker`) com polling periódico, proteção contra envio simultâneo por lease, unicidade na fila e retentativa fixa de **60 segundos** após falhas.
 
 ## Logging Estruturado (API & Worker)
@@ -28,6 +28,8 @@ cd dotnet
 dotnet restore
 dotnet test
 dotnet run --project src/api
+# Swagger UI disponível em: http://localhost:5150/swagger
+# Especificação OpenAPI 3.1: http://localhost:5150/openapi/v1.json
 # Em outro terminal:
 dotnet run --project src/worker
 ```
