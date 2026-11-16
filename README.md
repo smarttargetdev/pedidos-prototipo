@@ -1,11 +1,11 @@
-# Plataforma de Pedidos & Reserva de Estoque (.NET 10 + Simulador Web)
+# Plataforma de Pedidos (.NET 10)
 
-Solução completa em **.NET 10** (`api` e `worker`) estruturada com princípios **SOLID**, **Clean Code** e **Transactional Outbox** em **SQLite (EF Core 10)** para garantir zero perda de notificações ao sistema de estoque, acompanhada de um **painel simulador web interativo** para testar todo o ciclo de vida em tempo real.
+Solução completa em **.NET 10** (`api` e `worker`) estruturada com princípios **SOLID**, **Clean Code** e **Transactional Outbox** em **SQLite (EF Core 10)** para garantir zero perda de notificações ao sistema de estoque, acompanhada de um **painel simulador web interativo** (frontend) em React, para testar todo o ciclo de vida em tempo real.
 
 ## Revisão e Decisões Confirmadas
 
 > [!IMPORTANT]
-> As diretrizes abaixo foram confirmadas na etapa de esclarecimento e definem os pilares da solução:
+> As diretrizes abaixo foram confirmadas na etapa de refinamento e definem os pilares da solução:
 
 - **Entrega Híbrida (`.NET 10` + Simulador Web)**: Os projetos completos em `.NET 10` (`api` e `worker`) serão gerados prontos para uso local com `dotnet`, enquanto o ambiente web executará um backend Node/SQLite espelhado com painel visual interativo para criar, abortar, consultar e observar o processamento em segundo plano.
 - **Mensageria Confiável**: Padrão **Transactional Outbox** persistido no SQLite combinado com interface de fila simulada idempotente (`IMessageQueue`), garantindo unicidade por pedido e controle de concorrência por *lease/lock*.
@@ -16,7 +16,7 @@ Solução completa em **.NET 10** (`api` e `worker`) estruturada com princípios
 
 ## 1. Visão Geral e Conceito Central
 
-- **O que o sistema faz**: Registra pedidos de clientes com itens detalhados, calcula o total no servidor, atribui um identificador único (`Guid`) e aplica o stamp `PedidoCriado`. Pedidos válidos geram atomicamente uma mensagem de reserva na tabela Outbox para que o `worker` em segundo plano a encaminhe à fila e ao sistema de estoque mockado, com retenção e retentativa automática de **60 segundos** em caso de falha.
+- **O que o sistema faz**: Registra pedidos de clientes com itens detalhados, calcula o total no servidor, atribui um identificador único (usa um `Guid` como ID) e aplica o stamp `PedidoCriado`. Pedidos válidos geram atomicamente uma mensagem de reserva na tabela Outbox para que o `worker` em segundo plano a encaminhe à fila e ao sistema de estoque mockado, com retenção e retentativa automática de **60 segundos** em caso de falha.
 - **Público-alvo**: Engenheiros e arquitetos de software avaliando resiliência distribuída, garantia de entrega (*at-least-once* com deduplicação) e separação de responsabilidades entre Web API e Background Worker.
 - **Valor Principal**: Eliminação de condições de corrida, prevenção de envios duplicados ou simultâneos, proteção contra perda de eventos mesmo com estoque/fila indisponíveis e visualização imediata do comportamento sem necessidade de infraestrutura externa pesada.
 
